@@ -1,6 +1,18 @@
-"""Utilities for finding cluster sizes across simulations."""
+"""Utilities for finding cluster sizes across simulations.
+
+TODO:
+    * Complete configuration of :class:`AggregateProperties` so that we can
+      check whether a saved `DataFrame` has all the necessary columns.
+    * Implement full CLI functionality and allow `SimResults` and
+      `CoarseSimResults` to be stored in a JSON file.
+
+"""
+
+import argparse
 import random
 from collections import Counter, defaultdict
+from enum import Enum
+from functools import cached_property
 from pathlib import Path
 from typing import NamedTuple, Optional, Union
 
@@ -21,8 +33,6 @@ from scipy.sparse import coo_array
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial.distance import euclidean
 from tqdm import tqdm
-
-HERE = Path(__file__).parent
 
 
 def atom_to_mol_pairs(atom_pairs: np.ndarray, atom_per_mol: int) -> np.ndarray:
@@ -212,6 +222,70 @@ def get_cpe(a, b, c):
     return eab, eac
 
 
+class AggregateProperties(Enum):
+    AGGREGATION_NUMBERS = "Aggregation numbers"
+    ASPHERICITIES = "Asphericities"
+    ACYLINDRICITIES = "Acylindricities"
+    ANISOTROPIES = "Anisotropies"
+    CONVEXITIES = "Convexities"
+    EAB = "Eab"
+    EAC = "Eac"
+    SURFACE_ATOM_RATIO = "Surface atom ratio"
+    NUM_SURFACE_MOLECULES = "Num surface molecules"
+    SURFACE_MOLECULE_RATIO = "Surface molecule ratio"
+    SURFACE_ATOM_TYPES = "Surface atom types"
+    MEAN_CURVATURES = "Mean curvatures"
+    GAUSSIAN_CURVATURES = "Gaussian curvatures"
+
+    @classmethod
+    def all(cls) -> set["AggregateProperties"]:
+        return set(cls)
+
+    @classmethod
+    def one_per_agg(cls):
+        """Get the properties that are unique to each aggregate."""
+        return {
+            cls.AGGREGATION_NUMBERS,
+            cls.ASPHERICITIES,
+            cls.ACYLINDRICITIES,
+            cls.ANISOTROPIES,
+            cls.CONVEXITIES,
+            cls.EAB,
+            cls.EAC,
+            cls.SURFACE_ATOM_RATIO,
+            cls.NUM_SURFACE_MOLECULES,
+            cls.SURFACE_MOLECULE_RATIO,
+        }
+
+    @classmethod
+    def fast(cls):
+        return cls.one_per_agg().difference(
+            {
+                cls.SURFACE_ATOM_RATIO,
+                cls.SURFACE_MOLECULE_RATIO,
+                cls.SURFACE_ATOM_TYPES,
+                cls.CONVEXITIES,
+                cls.NUM_SURFACE_MOLECULES,
+            }
+        )
+
+    def __or__(self, other):
+        if isinstance(other, set):
+            return {self} | other
+        elif isinstance(other, AggregateProperties):
+            return {self, other}
+        else:
+            raise TypeError
+
+    def __ror__(self, other):
+        if isinstance(other, set):
+            return other | {self}
+        elif isinstance(other, AggregateProperties):
+            return {other, self}
+        else:
+            raise TypeError
+
+
 class MicelleAdjacency(AnalysisBase):
     """Class for computing the adjacency matrix of surfactants in micelles."""
 
@@ -238,6 +312,8 @@ class MicelleAdjacency(AnalysisBase):
         cutoff: float = 4.5,
         verbose=True,
         min_cluster_size: int = 5,
+        properties: set[AggregateProperties] = AggregateProperties.all(),
+        coarse: bool = False,
         **kwargs,
     ):
         """Split tails into different molecules."""
@@ -247,10 +323,35 @@ class MicelleAdjacency(AnalysisBase):
         self.cutoff = cutoff
         self.tailgroups = tailgroups
         self.min_cluster_size = min_cluster_size
+        self.properties = properties
+        self.coarse = coarse
 
         self.num_surf: int = tailgroups.n_residues
         self.whole_molecules: ResidueGroup = tailgroups.residues
         self.atom_per_mol = int(len(self.tailgroups) / self.num_surf)
+
+    @cached_property
+    def vdwradii(self) -> dict[str, float]:
+        """Determine the van der Waals radii for the atoms in the system."""
+        if self.coarse:
+            radii = dict()
+            for atom in self.tailgroups.universe.atoms:
+                # See Section 8.2 of
+                # http://cgmartini.nl/index.php/martini-3-tutorials/parameterizing-a-new-small-molecule
+                match atom.type[0]:
+                    case "S":
+                        radius = 0.225
+                    case "T":
+                        radius = 0.185
+                    case _:
+                        radius = 0.264
+
+                radii[atom.name] = radius
+
+            return radii
+
+        else:
+            return pytim_data.vdwradii(CHARMM36_TOP)
 
     def _prepare(self):
         """Initialise the results."""
@@ -317,25 +418,45 @@ class MicelleAdjacency(AnalysisBase):
 
             princ_moms = agg_residues.gyration_moments()
 
-            conv, mean_curv, G_curv = get_conv(agg_residues.atoms)
-            self.convexities.append(conv)
-            self.mean_curvs.append(mean_curv)
-            self.g_curvs.append(G_curv)
+            if self.properties.union(
+                AggregateProperties.CONVEXITIES
+                | AggregateProperties.MEAN_CURVATURES
+                | AggregateProperties.GAUSSIAN_CURVATURES
+            ):
+                conv, mean_curv, G_curv = get_conv(agg_residues.atoms, self.vdwradii)
+                self.convexities.append(conv)
+                self.mean_curvs.append(mean_curv)
+                self.g_curvs.append(G_curv)
 
-            semiaxis = calc_semiaxis(agg_residues)
-            cpe = get_cpe(*semiaxis)
-            self.eabs.append(cpe[0])
-            self.eacs.append(cpe[1])
+            if self.properties.union(AggregateProperties.EAB | AggregateProperties.EAC):
+                semiaxis = calc_semiaxis(agg_residues)
+                cpe = get_cpe(*semiaxis)
+                self.eabs.append(cpe[0])
+                self.eacs.append(cpe[1])
 
-            surface_ratio, num_surface_mols, surface_types = get_surface(agg_residues)
-            self.surface_atom_ratio.append(surface_ratio)
-            self.num_surface_mols.append(num_surface_mols)
-            self.surface_mol_ratio.append(num_surface_mols / agg_num)
-            self.surface_types.append(surface_types)
+            if self.properties.union(
+                AggregateProperties.SURFACE_ATOM_RATIO
+                | AggregateProperties.NUM_SURFACE_MOLECULES
+                | AggregateProperties.SURFACE_MOLECULE_RATIO
+                | AggregateProperties.SURFACE_ATOM_TYPES
+            ):
+                surface_ratio, num_surface_mols, surface_types = get_surface(
+                    agg_residues
+                )
+                self.surface_atom_ratio.append(surface_ratio)
+                self.num_surface_mols.append(num_surface_mols)
+                self.surface_mol_ratio.append(num_surface_mols / agg_num)
+                self.surface_types.append(surface_types)
 
-            self.asphericities.append(asphericity(princ_moms))
-            self.acylindricities.append(acylindricity(princ_moms))
-            self.anisotropies.append(anisotropy(princ_moms))
+            if AggregateProperties.ASPHERICITIES in self.properties:
+                self.asphericities.append(asphericity(princ_moms))
+
+            if AggregateProperties.ACYLINDRICITIES in self.properties:
+                self.acylindricities.append(acylindricity(princ_moms))
+
+            if AggregateProperties.ANISOTROPIES in self.properties:
+                self.anisotropies.append(anisotropy(princ_moms))
+
             self.agg_nums.append(agg_num)
 
             self.frame_counter.append(self._ts.frame)
@@ -357,6 +478,7 @@ class MicelleAdjacency(AnalysisBase):
                 "Surface atom ratio": self.surface_atom_ratio,
                 "Num surface molecules": self.num_surface_mols,
                 "Surface molecule ratio": self.surface_mol_ratio,
+                "Surface atom types": self.surface_types,
                 "Mean curvatures": self.mean_curvs,
                 "Gaussian curvatures": self.g_curvs,
             }
@@ -402,6 +524,64 @@ class SimResults(NamedTuple):
     @property
     def plot_name(self) -> str:
         return f"{self.percent_aot:.1f} wt.% AOT with {self.counterion.longname}"
+
+    @property
+    def adj_file(self) -> str:
+        return f"{self.name}-adj.npz"
+
+    @property
+    def df_file(self) -> str:
+        return f"{self.name}-df.csv"
+
+    @property
+    def agg_adj_file(self) -> str:
+        return f"{self.name}-agg-adj.gml"
+
+
+class Coarseness(NamedTuple):
+    dirname: str
+    friendly_name: str
+
+
+COARSEST = Coarseness("coarse-alpha", "Coarsest")
+MIXED = Coarseness("mixed-alpha", "Mixed")
+FINE = Coarseness("zeta", "Finest")
+
+
+class CoarseSimResults(NamedTuple):
+    """Information about some coarse-grained simulation results."""
+
+    percent_aot: Union[int, float]
+    coarseness: Coarseness
+    tpr_file: Path
+    traj_file: Path
+    tail_match: str
+
+    @property
+    def percent_str(self) -> str:
+        if isinstance(self.percent_aot, int):
+            return str(self.percent_aot)
+        return f"{self.percent_aot:.2f}".replace(".", "_")
+
+    @property
+    def name(self):
+        return f"{self.coarseness.friendly_name}-{self.percent_str}"
+
+    @property
+    def plot_name(self) -> str:
+        return f"{self.coarseness.friendly_name}: {self.percent_aot:.1f} wt.% AOT"
+
+    @property
+    def adj_file(self) -> str:
+        return f"{self.name}-adj.npz"
+
+    @property
+    def df_file(self) -> str:
+        return f"{self.name}-df.csv"
+
+    @property
+    def agg_adj_file(self) -> str:
+        return f"{self.name}-agg-adj.gml"
 
 
 class MCPosSolver:
@@ -474,7 +654,7 @@ class MCPosSolver:
         return {key: val for key, val in zip(self.starting_pos.keys(), self.pos_array)}
 
 
-def default_tail_ma(
+def all_atomistic_ma(
     result: SimResults, min_cluster_size: int = 5, step: int = 1
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
@@ -494,17 +674,34 @@ def default_tail_ma(
     return ma
 
 
-def get_agg_nums(
-    results: list[SimResults],
+def coarse_ma(
+    result: CoarseSimResults, min_cluster_size: int = 5, step: int = 1
+) -> MicelleAdjacency:
+    """Run a micelle adjacency analysis for the default tail group indices."""
+    u = mda.Universe(result.tpr_file, result.traj_file)
+    if step > 1:
+        u.transfer_to_memory(step=step)
+
+    tail_atoms = u.select_atoms(result.tail_match)
+
+    ma = MicelleAdjacency(tail_atoms, min_cluster_size=min_cluster_size, coarse=True)
+    ma.run()
+
+    return ma
+
+
+def batch_ma_analysis(
+    results: list[SimResults] | list[CoarseSimResults],
     min_cluster_size: int = 5,
     step: int = 1,
     only_last: bool = False,
+    dir_: Path = Path("."),
 ) -> pd.DataFrame:
     """Load MA results from disk or run analyses anew."""
     plot_df = pd.DataFrame()
     for result in results:
-        adj_path = HERE / f"{result.name}-adj.npz"
-        df_path = HERE / f"{result.name}-df.csv"
+        adj_path = dir_ / result.adj_file
+        df_path = dir_ / result.df_file
 
         if df_path.exists():
             print(f"Found existing files for {result.plot_name}.")
@@ -513,7 +710,10 @@ def get_agg_nums(
         else:
             print(f"Analysing {result.plot_name} results.")
 
-            ma = default_tail_ma(result, min_cluster_size, step)
+            if isinstance(result, CoarseSimResults):
+                ma = coarse_ma(result, min_cluster_size, step)
+            else:
+                ma = all_atomistic_ma(result, min_cluster_size, step)
             ma.save(adj_path, df_path)
 
             this_df = ma.df
@@ -528,20 +728,21 @@ def get_agg_nums(
         this_df["% AOT"] = f"{result.percent_aot:.1f}"
         this_df["% AOT"] = this_df["% AOT"].astype("category")
         this_df["Simulation"] = result.plot_name
-        this_df["Counterion"] = result.counterion.longname
+        if isinstance(result, SimResults):
+            this_df["Counterion"] = result.counterion.longname
 
         plot_df = pd.concat([plot_df, this_df], ignore_index=True)
 
     return plot_df
 
 
-def plot_agg_events(result: SimResults):
+def plot_agg_events(result: SimResults, dir_: Path = Path(".")):
     """Plot aggregation events."""
     # * Load adjacency matrix
-    adj_path = HERE / f"{result.name}-adj.npz"
+    adj_path = dir_ / result.adj_file
     adj_mats = load_sparse(adj_path)
 
-    agg_adj_path = HERE / f"{result.name}-agg-adj.gml"
+    agg_adj_path = dir_ / result.agg_adj_file
     try:
         G = nx.read_gml(agg_adj_path)
     except FileNotFoundError:
@@ -633,10 +834,13 @@ def plot_agg_events(result: SimResults):
 
 
 def compare_val(
-    results: list[SimResults], graph_file: Path, y_axis: str, min_cluster_size: int = 5
+    results: list[SimResults] | list[CoarseSimResults],
+    graph_file: Path,
+    y_axis: str,
+    min_cluster_size: int = 5,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = get_agg_nums(results, min_cluster_size)
+    plot_df = batch_ma_analysis(results, min_cluster_size)
 
     TIME_COL = "Time (ns)"
     plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
@@ -661,7 +865,7 @@ def compare_val(
 
 
 def compare_dist(
-    results: list[SimResults],
+    results: list[SimResults] | list[CoarseSimResults],
     graph_file: Path,
     y_axis: str,
     use_interval: bool = True,
@@ -673,7 +877,7 @@ def compare_dist(
     rename: Optional[str] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = get_agg_nums(results, min_cluster_size)
+    plot_df = batch_ma_analysis(results, min_cluster_size)
 
     TIME_COL = "Time (ns)"
     plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
@@ -725,12 +929,12 @@ def compare_dist(
 
 
 def compare_final_types(
-    results: list[SimResults],
+    results: list[SimResults] | list[CoarseSimResults],
     graph_file: Path,
     min_cluster_size: int = 5,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = get_agg_nums(results, min_cluster_size, only_last=True)
+    plot_df = batch_ma_analysis(results, min_cluster_size, only_last=True)
     plot_df.drop(columns=MicelleAdjacency.NON_TYPE_COLS, inplace=True)
 
     plot_df = plot_df.groupby(["Counterion", "% AOT"]).sum().reset_index()
@@ -752,14 +956,14 @@ def compare_final_types(
 
 
 def compare_cpe(
-    results: list[SimResults],
+    results: list[SimResults] | list[CoarseSimResults],
     graph_file: Path,
     use_interval: bool = True,
     interval: float = 20.0,
     min_cluster_size: int = 5,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = get_agg_nums(results, min_cluster_size)
+    plot_df = batch_ma_analysis(results, min_cluster_size)
 
     TIME_COL = "Time (ns)"
     plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
@@ -796,13 +1000,16 @@ def compare_cpe(
 
 
 def compare_clustering(
-    results: list[SimResults], graph_file: Path, min_cluster_size: int = 5
+    results: list[SimResults] | list[CoarseSimResults],
+    graph_file: Path,
+    min_cluster_size: int = 5,
+    dir_: Path = Path("."),
 ):
     """Compare the clustering behaviour of several simulations."""
     plot_df = pd.DataFrame()
     for result in results:
-        adj_path = HERE / f"{result.name}-adj.npz"
-        df_path = HERE / f"{result.name}-df.csv"
+        adj_path = dir_ / result.adj_file
+        df_path = dir_ / result.df_file
 
         if df_path.exists():
             print(f"Found existing files for {result.plot_name}.")
@@ -860,46 +1067,57 @@ def compare_clustering(
 
 if __name__ == "__main__":
     sns.set_theme(context="talk", style="dark", palette="flare")
-    all_results = [
-        SimResults(
-            1,
-            SODIUM,
-            HERE / "1-na-no-water.tpr",
-            HERE / "1-na-no-water.xtc",
-        ),
-        SimResults(
-            1,
-            CALCIUM,
-            HERE / "1-ca-no-water.tpr",
-            HERE / "1-ca-no-water.xtc",
-        ),
-        SimResults(
-            7.2,
-            SODIUM,
-            HERE / "7_2-na-no-water.tpr",
-            HERE / "7_2-na-no-water.xtc",
-        ),
-        SimResults(
-            7.2,
-            CALCIUM,
-            HERE / "7_2-ca-no-water.tpr",
-            HERE / "7_2-ca-no-water.xtc",
-        ),
-        SimResults(
-            20,
-            SODIUM,
-            HERE / "20-na-no-water.tpr",
-            HERE / "20-na-no-water.xtc",
-        ),
-        SimResults(
-            20,
-            CALCIUM,
-            HERE / "20-ca-no-water.tpr",
-            HERE / "20-ca-no-water.xtc",
-        ),
-    ]
 
-    get_agg_nums(all_results, min_cluster_size=5, step=100)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-d",
+        "--dir",
+        type=str,
+        default=str(Path(__file__).parent),
+        help="Directory to look in for files.",
+    )
+    args = parser.parse_args()
+
+    # all_results = [
+    #     SimResults(
+    #         1,
+    #         SODIUM,
+    #         HERE / "1-na-no-water.tpr",
+    #         HERE / "1-na-no-water.xtc",
+    #     ),
+    #     SimResults(
+    #         1,
+    #         CALCIUM,
+    #         HERE / "1-ca-no-water.tpr",
+    #         HERE / "1-ca-no-water.xtc",
+    #     ),
+    #     SimResults(
+    #         7.2,
+    #         SODIUM,
+    #         HERE / "7_2-na-no-water.tpr",
+    #         HERE / "7_2-na-no-water.xtc",
+    #     ),
+    #     SimResults(
+    #         7.2,
+    #         CALCIUM,
+    #         HERE / "7_2-ca-no-water.tpr",
+    #         HERE / "7_2-ca-no-water.xtc",
+    #     ),
+    #     SimResults(
+    #         20,
+    #         SODIUM,
+    #         HERE / "20-na-no-water.tpr",
+    #         HERE / "20-na-no-water.xtc",
+    #     ),
+    #     SimResults(
+    #         20,
+    #         CALCIUM,
+    #         HERE / "20-ca-no-water.tpr",
+    #         HERE / "20-ca-no-water.xtc",
+    #     ),
+    # ]
+
+    # get_agg_nums(all_results, min_cluster_size=5, step=100)
 
     # compare_clustering(all_results, HERE / "clustering-comp.png")
     # compare_val(all_results, HERE / "num-clusters-comp-new.png", "Num clusters")
@@ -926,16 +1144,16 @@ if __name__ == "__main__":
     # compare_cpe(all_results, HERE / "cpe-comp.pdf")
     # compare_dist(all_results, HERE / "eab-dist-comp.pdf", "Eab", rename="$e_{ab}$")
 
-    compare_dist(
-        all_results, HERE / "surf-atom-dist-comp.pdf", "Surface atom ratio", ylim=(0, 1)
-    )
-    compare_dist(
-        all_results,
-        HERE / "surf-mol-dist-comp.pdf",
-        "Surface molecule ratio",
-        ylim=(0, 1),
-    )
-    compare_final_types(all_results, HERE / "final-types-comp.pdf")
+    # compare_dist(
+    #     all_results, HERE / "surf-atom-dist-comp.pdf", "Surface atom ratio", ylim=(0, 1)
+    # )
+    # compare_dist(
+    #     all_results,
+    #     HERE / "surf-mol-dist-comp.pdf",
+    #     "Surface molecule ratio",
+    #     ylim=(0, 1),
+    # )
+    # compare_final_types(all_results, HERE / "final-types-comp.pdf")
 
     # for result in all_results:
     #     plot_agg_events(result)
