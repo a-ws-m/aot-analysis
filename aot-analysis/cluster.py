@@ -691,7 +691,7 @@ def coarse_ma(
 
 
 def batch_ma_analysis(
-    results: list[SimResults] | list[CoarseSimResults],
+    results: list[SimResults | CoarseSimResults],
     min_cluster_size: int = 5,
     step: int = 1,
     only_last: bool = False,
@@ -834,7 +834,7 @@ def plot_agg_events(result: SimResults, dir_: Path = Path(".")):
 
 
 def compare_val(
-    results: list[SimResults] | list[CoarseSimResults],
+    results: list[SimResults | CoarseSimResults],
     graph_file: Path,
     y_axis: str,
     min_cluster_size: int = 5,
@@ -865,7 +865,7 @@ def compare_val(
 
 
 def compare_dist(
-    results: list[SimResults] | list[CoarseSimResults],
+    results: list[SimResults | CoarseSimResults],
     graph_file: Path,
     y_axis: str,
     use_interval: bool = True,
@@ -929,7 +929,7 @@ def compare_dist(
 
 
 def compare_final_types(
-    results: list[SimResults] | list[CoarseSimResults],
+    results: list[SimResults | CoarseSimResults],
     graph_file: Path,
     min_cluster_size: int = 5,
 ):
@@ -956,7 +956,7 @@ def compare_final_types(
 
 
 def compare_cpe(
-    results: list[SimResults] | list[CoarseSimResults],
+    results: list[SimResults | CoarseSimResults],
     graph_file: Path,
     use_interval: bool = True,
     interval: float = 20.0,
@@ -1000,7 +1000,7 @@ def compare_cpe(
 
 
 def compare_clustering(
-    results: list[SimResults] | list[CoarseSimResults],
+    results: list[SimResults | CoarseSimResults],
     graph_file: Path,
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
@@ -1018,7 +1018,11 @@ def compare_clustering(
         else:
             print(f"Analysing {result.plot_name} results.")
 
-            ma = default_tail_ma(result)
+            ma = (
+                all_atomistic_ma(result)
+                if isinstance(result, SimResults)
+                else coarse_ma(result)
+            )
             ma.save(adj_path, df_path)
 
             this_df = ma.df
