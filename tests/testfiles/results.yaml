@@ -2,6 +2,11 @@ Counterions:
   ca: Ca2+
   na: Na+
 
+Mappings:
+  coarse-alpha: "Coarsest"
+  mixed-alpha: "Mixed"
+  fine: "Fine"
+
 AtomisticResults:
   root: .
   results:

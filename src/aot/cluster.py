@@ -24,6 +24,7 @@ import pandas as pd
 import pytim
 import pyvista as pv
 import seaborn as sns
+import yaml
 from MDAnalysis.analysis.base import AnalysisBase, AtomGroup
 from MDAnalysis.analysis.distances import capped_distance
 from MDAnalysis.core.groups import ResidueGroup
@@ -584,7 +585,36 @@ class CoarseResults(NamedTuple):
         return f"{self.name}-agg-adj.gml"
 
 
-class ResultsYAML: ...
+class ResultsYAML:
+
+    def __init__(self, file: Path) -> None:
+        self.file = file
+        self.data = yaml.load(file.read_text(), Loader=yaml.SafeLoader)
+        self._parse()
+
+    def _parse(self):
+        """Parse the incoming YAML file."""
+        self.counterions = {
+            key: Counterion(shortname=key, longname=val)
+            for key, val in self.data["Counterions"].items()
+        }
+        self.mappings = {
+            key: Coarseness(dirname=key, friendly_name=val)
+            for key, val in self.data["Mappings"].items()
+        }
+
+        self.atomistic_results = []
+        for res in self.data["AtomisticResults"]:
+            res["counterion"] = self.counterions[res["counterion"]]
+            self.atomistic_results.append(AtomisticResults(**res))
+
+        self.coarse_results = []
+        for res in self.data["CoarseResults"]:
+            res["coarseness"] = self.mappings[res["coarseness"]]
+            self.coarse_results.append(CoarseResults(**res))
+    
+    def get_results(self) -> list[AtomisticResults | CoarseResults]:
+        return self.atomistic_results + self.coarse_results
 
 
 class MCPosSolver:
