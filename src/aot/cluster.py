@@ -503,7 +503,7 @@ CALCIUM = Counterion("ca", "Ca2+")
 SODIUM = Counterion("na", "Na+")
 
 
-class SimResults(NamedTuple):
+class AtomisticResults(NamedTuple):
     """Information about some simulation results."""
 
     percent_aot: Union[int, float]
@@ -548,7 +548,7 @@ MIXED = Coarseness("mixed-alpha", "Mixed")
 FINE = Coarseness("zeta", "Finest")
 
 
-class CoarseSimResults(NamedTuple):
+class CoarseResults(NamedTuple):
     """Information about some coarse-grained simulation results."""
 
     percent_aot: Union[int, float]
@@ -582,6 +582,9 @@ class CoarseSimResults(NamedTuple):
     @property
     def agg_adj_file(self) -> str:
         return f"{self.name}-agg-adj.gml"
+
+
+class ResultsYAML: ...
 
 
 class MCPosSolver:
@@ -655,7 +658,7 @@ class MCPosSolver:
 
 
 def all_atomistic_ma(
-    result: SimResults, min_cluster_size: int = 5, step: int = 1
+    result: AtomisticResults, min_cluster_size: int = 5, step: int = 1
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = mda.Universe(result.tpr_file, result.traj_file)
@@ -675,7 +678,7 @@ def all_atomistic_ma(
 
 
 def coarse_ma(
-    result: CoarseSimResults, min_cluster_size: int = 5, step: int = 1
+    result: CoarseResults, min_cluster_size: int = 5, step: int = 1
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = mda.Universe(result.tpr_file, result.traj_file)
@@ -691,7 +694,7 @@ def coarse_ma(
 
 
 def batch_ma_analysis(
-    results: list[SimResults | CoarseSimResults],
+    results: list[AtomisticResults | CoarseResults],
     min_cluster_size: int = 5,
     step: int = 1,
     only_last: bool = False,
@@ -710,7 +713,7 @@ def batch_ma_analysis(
         else:
             print(f"Analysing {result.plot_name} results.")
 
-            if isinstance(result, CoarseSimResults):
+            if isinstance(result, CoarseResults):
                 ma = coarse_ma(result, min_cluster_size, step)
             else:
                 ma = all_atomistic_ma(result, min_cluster_size, step)
@@ -728,7 +731,7 @@ def batch_ma_analysis(
         this_df["% AOT"] = f"{result.percent_aot:.1f}"
         this_df["% AOT"] = this_df["% AOT"].astype("category")
         this_df["Simulation"] = result.plot_name
-        if isinstance(result, SimResults):
+        if isinstance(result, AtomisticResults):
             this_df["Counterion"] = result.counterion.longname
 
         plot_df = pd.concat([plot_df, this_df], ignore_index=True)
@@ -736,7 +739,7 @@ def batch_ma_analysis(
     return plot_df
 
 
-def plot_agg_events(result: SimResults, dir_: Path = Path(".")):
+def plot_agg_events(result: AtomisticResults, dir_: Path = Path(".")):
     """Plot aggregation events."""
     # * Load adjacency matrix
     adj_path = dir_ / result.adj_file
@@ -834,7 +837,7 @@ def plot_agg_events(result: SimResults, dir_: Path = Path(".")):
 
 
 def compare_val(
-    results: list[SimResults | CoarseSimResults],
+    results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     y_axis: str,
     min_cluster_size: int = 5,
@@ -865,7 +868,7 @@ def compare_val(
 
 
 def compare_dist(
-    results: list[SimResults | CoarseSimResults],
+    results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     y_axis: str,
     use_interval: bool = True,
@@ -929,7 +932,7 @@ def compare_dist(
 
 
 def compare_final_types(
-    results: list[SimResults | CoarseSimResults],
+    results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     min_cluster_size: int = 5,
 ):
@@ -956,7 +959,7 @@ def compare_final_types(
 
 
 def compare_cpe(
-    results: list[SimResults | CoarseSimResults],
+    results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     use_interval: bool = True,
     interval: float = 20.0,
@@ -1000,7 +1003,7 @@ def compare_cpe(
 
 
 def compare_clustering(
-    results: list[SimResults | CoarseSimResults],
+    results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
@@ -1020,7 +1023,7 @@ def compare_clustering(
 
             ma = (
                 all_atomistic_ma(result)
-                if isinstance(result, SimResults)
+                if isinstance(result, AtomisticResults)
                 else coarse_ma(result)
             )
             ma.save(adj_path, df_path)
