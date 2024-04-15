@@ -1,0 +1,19 @@
+Counterions:
+  ca: Ca2+
+  na: Na+
+
+AtomisticResults:
+  root: .
+  results:
+    - percent: 1
+      counterion: ca
+      tpr_path: 1-ca-no-water.tpr
+      traj_path: 1-ca-no-water.xtc
+
+CoarseResults:
+  root: .
+  results:
+    - percent: 1
+      counterion: na
+      tpr_path: 1_09-percent/no-water.tpr
+      traj_path: 1_09-percent/no-water.xtc
