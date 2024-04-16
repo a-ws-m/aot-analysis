@@ -28,7 +28,7 @@ import yaml
 from MDAnalysis.analysis.base import AnalysisBase, AtomGroup
 from MDAnalysis.analysis.distances import capped_distance
 from MDAnalysis.core.groups import ResidueGroup
-from pytim.datafiles import *
+from pytim.datafiles import CHARMM27_TOP, pytim_data
 from scipy import spatial
 from scipy.sparse import coo_array
 from scipy.sparse.csgraph import connected_components
@@ -612,7 +612,7 @@ class ResultsYAML:
         for res in self.data["CoarseResults"]:
             res["coarseness"] = self.mappings[res["coarseness"]]
             self.coarse_results.append(CoarseResults(**res))
-    
+
     def get_results(self) -> list[AtomisticResults | CoarseResults]:
         return self.atomistic_results + self.coarse_results
 
