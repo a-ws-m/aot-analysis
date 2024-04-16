@@ -539,6 +539,7 @@ class Coarseness(NamedTuple):
     dirname: str
     friendly_name: str
     tail_match: str
+    cutoff: float
 
 
 class CoarseResults(NamedTuple):
@@ -552,6 +553,10 @@ class CoarseResults(NamedTuple):
     @property
     def tail_match(self) -> str:
         return self.coarseness.tail_match
+
+    @property
+    def cutoff(self) -> float:
+        return self.coarseness.cutoff
 
     @property
     def percent_str(self) -> str:
@@ -596,7 +601,12 @@ class ResultsYAML:
             for key, val in self.data["Counterions"].items()
         }
         self.mappings = {
-            key: Coarseness(dirname=key, friendly_name=val["friendly_name"], tail_match=val["tail_match"])
+            key: Coarseness(
+                dirname=key,
+                friendly_name=val["friendly_name"],
+                tail_match=val["tail_match"],
+                cutoff=val["cutoff"],
+            )
             for key, val in self.data["Mappings"].items()
         }
 
@@ -718,7 +728,9 @@ def coarse_ma(
 
     tail_atoms = u.select_atoms(result.tail_match)
 
-    ma = MicelleAdjacency(tail_atoms, min_cluster_size=min_cluster_size, coarse=True)
+    ma = MicelleAdjacency(
+        tail_atoms, cutoff=result.cutoff, min_cluster_size=min_cluster_size, coarse=True
+    )
     ma.run()
 
     return ma
@@ -1116,7 +1128,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-r",
-        type=str
+        type=str,
         default="results.yaml",
         help="YAML file containing the results to analyse. See tests/testfiles/results.yaml for an example.",
     )
@@ -1133,7 +1145,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Compare the clustering behaviour of several simulations.",
     )
-    plot_options.add_argument( 
+    plot_options.add_argument(
         "--num-clusters",
         action="store_true",
         help="Compare the number of clusters in several simulations.",
@@ -1176,21 +1188,23 @@ if __name__ == "__main__":
 
     if args.clustering:
         compare_clustering(results, WORKING_DIR / "clustering-comp.png")
-    
+
     if args.num_clusters:
         compare_val(results, WORKING_DIR / "num-clusters-comp-new.png", "Num clusters")
-    
+
     if args.agg_num:
-        compare_dist(results, WORKING_DIR / "agg-num-comp-new.png", "Aggregation numbers")
-    
+        compare_dist(
+            results, WORKING_DIR / "agg-num-comp-new.png", "Aggregation numbers"
+        )
+
     if args.asp_num:
         compare_dist(results, WORKING_DIR / "asp-num-comp.png", "Asphericities")
-    
+
     if args.acy_num:
         compare_dist(results, WORKING_DIR / "acy-num-comp.png", "Acylindricities")
-    
+
     if args.aniso_num:
         compare_dist(results, WORKING_DIR / "aniso-num-comp.png", "Anisotropies")
-    
+
     if args.cpe:
         compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")

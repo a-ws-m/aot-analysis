@@ -6,12 +6,15 @@ Mappings:
   coarse-alpha:
     friendly_name: "Coarsest"
     tail_match: "name C[MB][LR]"
+    cutoff: 0.5
   mixed-alpha:
     friendly_name: "Mixed"
     tail_match: "name C[LR]*"
+    cutoff: 0.5
   fine:
     friendly_name: "Fine"
     tail_match: "name T[LR]*"
+    cutoff: 0.5
 
 AtomisticResults:
   root: .
