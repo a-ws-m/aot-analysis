@@ -10,9 +10,15 @@ TODO:
 
 import argparse
 import random
+import sys
 from collections import Counter, defaultdict
 from enum import Enum
-from functools import cached_property
+
+try:
+    from functools import cached_property
+except ImportError:
+    from cached_property import cached_property
+
 from pathlib import Path
 from typing import NamedTuple, Optional, Union
 
@@ -27,10 +33,16 @@ import seaborn as sns
 import yaml
 from MDAnalysis.analysis.base import AnalysisBase, AtomGroup
 from MDAnalysis.analysis.distances import capped_distance
+from MDAnalysis.analysis.rdf import InterRDF
 from MDAnalysis.core.groups import ResidueGroup
 from pytim.datafiles import CHARMM27_TOP, pytim_data
 from scipy import spatial
-from scipy.sparse import coo_array
+
+try:
+    from scipy.sparse import coo_array
+except ImportError:
+    from scipy.sparse import coo_matrix as coo_array
+
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial.distance import euclidean
 from tqdm import tqdm
@@ -48,7 +60,7 @@ def atom_to_mol_pairs(atom_pairs: np.ndarray, atom_per_mol: int) -> np.ndarray:
     return mol_pairs[mask]
 
 
-def save_sparse(sparse_arrs: list[coo_array], file, compressed=True):
+def save_sparse(sparse_arrs: "list[coo_array]", file, compressed=True):
     """Save several sparse arrays to a file."""
     arrays_dict = {}
     for idx, mat in enumerate(sparse_arrs):
@@ -600,29 +612,28 @@ class ResultsYAML:
             key: Counterion(shortname=key, longname=val)
             for key, val in self.data["Counterions"].items()
         }
-        self.mappings = {
-            key: Coarseness(
-                dirname=key,
-                friendly_name=val["friendly_name"],
-                tail_match=val["tail_match"],
-                cutoff=val["cutoff"],
-            )
-            for key, val in self.data["Mappings"].items()
-        }
 
         self.atomistic_results = []
-        for res in self.data["AtomisticResults"]:
+        for res in self.data["AtomisticResults"]["results"]:
+            res["percent_aot"] = float(res.pop("percent"))
             res["counterion"] = self.counterions[res["counterion"]]
             res["tpr_file"] = self.root / res["tpr_file"]
             res["traj_file"] = self.root / res["traj_file"]
             self.atomistic_results.append(AtomisticResults(**res))
 
         self.coarse_results = []
-        for res in self.data["CoarseResults"]:
-            res["coarseness"] = self.mappings[res["coarseness"]]
-            res["tpr_file"] = self.root / res["tpr_file"]
-            res["traj_file"] = self.root / res["traj_file"]
-            self.coarse_results.append(CoarseResults(**res))
+        for mapping_name, data in self.data["CoarseResults"].items():
+            coarseness = Coarseness(
+                data["dirname"], mapping_name, data["tail_match"], data["cutoff"]
+            )
+
+            rel_path = self.root / coarseness.dirname
+            for res in data["results"]:
+                res["percent_aot"] = float(res.pop("percent"))
+                res["coarseness"] = coarseness
+                res["tpr_file"] = rel_path / res["tpr_file"]
+                res["traj_file"] = rel_path / res["traj_file"]
+                self.coarse_results.append(CoarseResults(**res))
 
     def get_results(self) -> "list[AtomisticResults | CoarseResults]":
         return self.atomistic_results + self.coarse_results
@@ -1115,6 +1126,39 @@ def compare_clustering(
     g.savefig(graph_file)
 
 
+def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10):
+    """Plot the radial distribution between tail group beads."""
+    plot_df = pd.DataFrame()
+
+    for result in results:
+        u = mda.Universe(result.tpr_file, result.traj_file)
+        u.transfer_to_memory(step=step)
+        tail_atoms = u.select_atoms(result.tail_match)
+        rdf = InterRDF(
+            tail_atoms, tail_atoms, nbins=200, range=(2.5, 7), exclude_same="residue"
+        )
+        rdf.run(verbose=True)
+
+        df = pd.DataFrame(
+            {r"Distance ($\AA$)": rdf.results.bins, "p(n)": rdf.results.rdf}
+        )
+        df["Mapping"] = result.coarseness.friendly_name
+        df["% AOT"] = result.percent_aot
+        plot_df = pd.concat([plot_df, df], ignore_index=True)
+
+    g = sns.relplot(
+        data=plot_df,
+        x=r"Distance ($\AA$)",
+        y="p(n)",
+        col="Mapping",
+        kind="line",
+        hue="% AOT",
+        facet_kws={"margin_titles": True, "despine": False},
+    )
+    g.tight_layout()
+    g.savefig(graph_file, transparent=False)
+
+
 if __name__ == "__main__":
     sns.set_theme(context="talk", style="dark", palette="flare")
 
@@ -1123,7 +1167,7 @@ if __name__ == "__main__":
         "-d",
         "--dir",
         type=str,
-        default=str(Path(__file__).parent),
+        default=".",
         help="Directory to look in for files.",
     )
     parser.add_argument(
@@ -1138,6 +1182,11 @@ if __name__ == "__main__":
         default=100,
         dest="step_size",
         help="Number of steps to skip in the trajectory.",
+    )
+    parser.add_argument(
+        "--rdf",
+        action="store_true",
+        help="Plot the RDFs between tail group beads and exit.",
     )
     plot_options = parser.add_argument_group("Plot types")
     plot_options.add_argument(
@@ -1183,6 +1232,13 @@ if __name__ == "__main__":
 
     results_yaml = ResultsYAML(WORKING_DIR, args.r)
     results = results_yaml.get_results()
+
+    if args.rdf:
+        tail_rdf(
+            [result for result in results if isinstance(result, CoarseResults)],
+            WORKING_DIR / "tail-rdf.pdf",
+        )
+        sys.exit()
 
     batch_ma_analysis(results, min_cluster_size=5, step=args.step_size)
 
