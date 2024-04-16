@@ -66,7 +66,7 @@ def save_sparse(sparse_arrs: list[coo_array], file, compressed=True):
         np.savez(file, **arrays_dict)
 
 
-def load_sparse(file) -> list[coo_array]:
+def load_sparse(file) -> "list[coo_array]":
     """Load a sparse array from disk."""
     sparse_arrs = []
 
@@ -112,7 +112,7 @@ def anisotropy(principal_moments: np.ndarray) -> float:
 
 def get_conv(
     group: AtomGroup, radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP)
-) -> tuple[float, list[float], list[float]]:
+) -> "tuple[float, list[float], list[float]]":
     u = group.universe
 
     # Get the surface
@@ -152,7 +152,7 @@ def get_conv(
 
 def get_surface(
     residues: ResidueGroup, radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP)
-) -> tuple[float, int, dict[str, float]]:
+) -> "tuple[float, int, dict[str, float]]":
     u = residues.universe
 
     # Get the surface
@@ -239,7 +239,7 @@ class AggregateProperties(Enum):
     GAUSSIAN_CURVATURES = "Gaussian curvatures"
 
     @classmethod
-    def all(cls) -> set["AggregateProperties"]:
+    def all(cls) -> 'set["AggregateProperties"]':
         return set(cls)
 
     @classmethod
@@ -313,7 +313,7 @@ class MicelleAdjacency(AnalysisBase):
         cutoff: float = 4.5,
         verbose=True,
         min_cluster_size: int = 5,
-        properties: set[AggregateProperties] = AggregateProperties.all(),
+        properties: "set[AggregateProperties]" = AggregateProperties.all(),
         coarse: bool = False,
         **kwargs,
     ):
@@ -332,20 +332,20 @@ class MicelleAdjacency(AnalysisBase):
         self.atom_per_mol = int(len(self.tailgroups) / self.num_surf)
 
     @cached_property
-    def vdwradii(self) -> dict[str, float]:
+    def vdwradii(self) -> "dict[str, float]":
         """Determine the van der Waals radii for the atoms in the system."""
         if self.coarse:
             radii = dict()
             for atom in self.tailgroups.universe.atoms:
                 # See Section 8.2 of
                 # http://cgmartini.nl/index.php/martini-3-tutorials/parameterizing-a-new-small-molecule
-                match atom.type[0]:
-                    case "S":
-                        radius = 0.225
-                    case "T":
-                        radius = 0.185
-                    case _:
-                        radius = 0.264
+                atom_type = atom.type[0]
+                if atom_type == "S":
+                    radius = 0.225
+                elif atom_type == "T":
+                    radius = 0.185
+                else:
+                    radius = 0.264
 
                 radii[atom.name] = radius
 
@@ -500,10 +500,6 @@ class Counterion(NamedTuple):
     longname: str
 
 
-CALCIUM = Counterion("ca", "Ca2+")
-SODIUM = Counterion("na", "Na+")
-
-
 class AtomisticResults(NamedTuple):
     """Information about some simulation results."""
 
@@ -542,11 +538,7 @@ class AtomisticResults(NamedTuple):
 class Coarseness(NamedTuple):
     dirname: str
     friendly_name: str
-
-
-COARSEST = Coarseness("coarse-alpha", "Coarsest")
-MIXED = Coarseness("mixed-alpha", "Mixed")
-FINE = Coarseness("zeta", "Finest")
+    tail_match: str
 
 
 class CoarseResults(NamedTuple):
@@ -556,7 +548,10 @@ class CoarseResults(NamedTuple):
     coarseness: Coarseness
     tpr_file: Path
     traj_file: Path
-    tail_match: str
+
+    @property
+    def tail_match(self) -> str:
+        return self.coarseness.tail_match
 
     @property
     def percent_str(self) -> str:
@@ -587,9 +582,11 @@ class CoarseResults(NamedTuple):
 
 class ResultsYAML:
 
-    def __init__(self, file: Path) -> None:
+    def __init__(self, root: Path, file: str) -> None:
+        self.root = root
         self.file = file
-        self.data = yaml.load(file.read_text(), Loader=yaml.SafeLoader)
+        self.path = root / file
+        self.data = yaml.load(self.path.read_text(), Loader=yaml.SafeLoader)
         self._parse()
 
     def _parse(self):
@@ -599,21 +596,25 @@ class ResultsYAML:
             for key, val in self.data["Counterions"].items()
         }
         self.mappings = {
-            key: Coarseness(dirname=key, friendly_name=val)
+            key: Coarseness(dirname=key, friendly_name=val["friendly_name"], tail_match=val["tail_match"])
             for key, val in self.data["Mappings"].items()
         }
 
         self.atomistic_results = []
         for res in self.data["AtomisticResults"]:
             res["counterion"] = self.counterions[res["counterion"]]
+            res["tpr_file"] = self.root / res["tpr_file"]
+            res["traj_file"] = self.root / res["traj_file"]
             self.atomistic_results.append(AtomisticResults(**res))
 
         self.coarse_results = []
         for res in self.data["CoarseResults"]:
             res["coarseness"] = self.mappings[res["coarseness"]]
+            res["tpr_file"] = self.root / res["tpr_file"]
+            res["traj_file"] = self.root / res["traj_file"]
             self.coarse_results.append(CoarseResults(**res))
 
-    def get_results(self) -> list[AtomisticResults | CoarseResults]:
+    def get_results(self) -> "list[AtomisticResults | CoarseResults]":
         return self.atomistic_results + self.coarse_results
 
 
@@ -639,7 +640,7 @@ class MCPosSolver:
 
         self.num_swaps: int = 0
 
-    def try_swap(self, layer: int, idxs: tuple[int, int]) -> bool:
+    def try_swap(self, layer: int, idxs: "tuple[int, int]") -> bool:
         """Try swapping two nodes in a layer."""
         curr_dist = 0
         first_node_idx = self.layers[layer][idxs[0]]
@@ -724,7 +725,7 @@ def coarse_ma(
 
 
 def batch_ma_analysis(
-    results: list[AtomisticResults | CoarseResults],
+    results: "list[AtomisticResults | CoarseResults]",
     min_cluster_size: int = 5,
     step: int = 1,
     only_last: bool = False,
@@ -867,7 +868,7 @@ def plot_agg_events(result: AtomisticResults, dir_: Path = Path(".")):
 
 
 def compare_val(
-    results: list[AtomisticResults | CoarseResults],
+    results: "list[AtomisticResults | CoarseResults]",
     graph_file: Path,
     y_axis: str,
     min_cluster_size: int = 5,
@@ -898,13 +899,13 @@ def compare_val(
 
 
 def compare_dist(
-    results: list[AtomisticResults | CoarseResults],
+    results: "list[AtomisticResults | CoarseResults]",
     graph_file: Path,
     y_axis: str,
     use_interval: bool = True,
     interval: float = 20.0,
     min_cluster_size: int = 5,
-    ylim: Optional[tuple[float, float]] = None,
+    ylim: Optional["tuple[float, float]"] = None,
     semilog: bool = False,
     use_hue: bool = True,
     rename: Optional[str] = None,
@@ -962,7 +963,7 @@ def compare_dist(
 
 
 def compare_final_types(
-    results: list[AtomisticResults | CoarseResults],
+    results: "list[AtomisticResults | CoarseResults]",
     graph_file: Path,
     min_cluster_size: int = 5,
 ):
@@ -989,7 +990,7 @@ def compare_final_types(
 
 
 def compare_cpe(
-    results: list[AtomisticResults | CoarseResults],
+    results: "list[AtomisticResults | CoarseResults]",
     graph_file: Path,
     use_interval: bool = True,
     interval: float = 20.0,
@@ -1033,7 +1034,7 @@ def compare_cpe(
 
 
 def compare_clustering(
-    results: list[AtomisticResults | CoarseResults],
+    results: "list[AtomisticResults | CoarseResults]",
     graph_file: Path,
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
@@ -1113,7 +1114,56 @@ if __name__ == "__main__":
         default=str(Path(__file__).parent),
         help="Directory to look in for files.",
     )
+    parser.add_argument(
+        "-r",
+        type=str
+        default="results.yaml",
+        help="YAML file containing the results to analyse. See tests/testfiles/results.yaml for an example.",
+    )
+    plot_options = parser.add_argument_group("Plot types")
+    plot_options.add_argument(
+        "--clustering",
+        action="store_true",
+        help="Compare the clustering behaviour of several simulations.",
+    )
+    plot_options.add_argument( 
+        "--num-clusters",
+        action="store_true",
+        help="Compare the number of clusters in several simulations.",
+    )
+    plot_options.add_argument(
+        "--agg-num",
+        action="store_true",
+        help="Compare the aggregation numbers in several simulations.",
+    )
+    plot_options.add_argument(
+        "--asp-num",
+        action="store_true",
+        help="Compare the asphericities in several simulations.",
+    )
+    plot_options.add_argument(
+        "--aniso-num",
+        action="store_true",
+        help="Compare the anisotropies in several simulations.",
+    )
+    plot_options.add_argument(
+        "--acy-num",
+        action="store_true",
+        help="Compare the acylindricities in several simulations.",
+    )
+    plot_options.add_argument(
+        "--cpe",
+        action="store_true",
+        help="Compare the coordinate-pair eccentricities in several simulations.",
+    )
     args = parser.parse_args()
+
+    WORKING_DIR = Path(args.dir)
+    if not WORKING_DIR.exists():
+        raise FileNotFoundError(f"Directory {WORKING_DIR} not found.")
+
+    results_yaml = ResultsYAML(WORKING_DIR, args.r)
+    results = results_yaml.get_results()
 
     # all_results = [
     #     SimResults(
@@ -1153,6 +1203,27 @@ if __name__ == "__main__":
     #         HERE / "20-ca-no-water.xtc",
     #     ),
     # ]
+
+    if args.clustering:
+        compare_clustering(results, WORKING_DIR / "clustering-comp.png")
+    
+    if args.num_clusters:
+        compare_val(results, WORKING_DIR / "num-clusters-comp-new.png", "Num clusters")
+    
+    if args.agg_num:
+        compare_dist(results, WORKING_DIR / "agg-num-comp-new.png", "Aggregation numbers")
+    
+    if args.asp_num:
+        compare_dist(results, WORKING_DIR / "asp-num-comp.png", "Asphericities")
+    
+    if args.acy_num:
+        compare_dist(results, WORKING_DIR / "acy-num-comp.png", "Acylindricities")
+    
+    if args.aniso_num:
+        compare_dist(results, WORKING_DIR / "aniso-num-comp.png", "Anisotropies")
+    
+    if args.cpe:
+        compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")
 
     # get_agg_nums(all_results, min_cluster_size=5, step=100)
 
