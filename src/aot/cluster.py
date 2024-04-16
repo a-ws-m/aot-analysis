@@ -1120,6 +1120,13 @@ if __name__ == "__main__":
         default="results.yaml",
         help="YAML file containing the results to analyse. See tests/testfiles/results.yaml for an example.",
     )
+    parser.add_argument(
+        "-n",
+        type=int,
+        default=100,
+        dest="step_size",
+        help="Number of steps to skip in the trajectory.",
+    )
     plot_options = parser.add_argument_group("Plot types")
     plot_options.add_argument(
         "--clustering",
@@ -1165,44 +1172,7 @@ if __name__ == "__main__":
     results_yaml = ResultsYAML(WORKING_DIR, args.r)
     results = results_yaml.get_results()
 
-    # all_results = [
-    #     SimResults(
-    #         1,
-    #         SODIUM,
-    #         HERE / "1-na-no-water.tpr",
-    #         HERE / "1-na-no-water.xtc",
-    #     ),
-    #     SimResults(
-    #         1,
-    #         CALCIUM,
-    #         HERE / "1-ca-no-water.tpr",
-    #         HERE / "1-ca-no-water.xtc",
-    #     ),
-    #     SimResults(
-    #         7.2,
-    #         SODIUM,
-    #         HERE / "7_2-na-no-water.tpr",
-    #         HERE / "7_2-na-no-water.xtc",
-    #     ),
-    #     SimResults(
-    #         7.2,
-    #         CALCIUM,
-    #         HERE / "7_2-ca-no-water.tpr",
-    #         HERE / "7_2-ca-no-water.xtc",
-    #     ),
-    #     SimResults(
-    #         20,
-    #         SODIUM,
-    #         HERE / "20-na-no-water.tpr",
-    #         HERE / "20-na-no-water.xtc",
-    #     ),
-    #     SimResults(
-    #         20,
-    #         CALCIUM,
-    #         HERE / "20-ca-no-water.tpr",
-    #         HERE / "20-ca-no-water.xtc",
-    #     ),
-    # ]
+    batch_ma_analysis(results, min_cluster_size=5, step=args.step_size)
 
     if args.clustering:
         compare_clustering(results, WORKING_DIR / "clustering-comp.png")
@@ -1224,44 +1194,3 @@ if __name__ == "__main__":
     
     if args.cpe:
         compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")
-
-    # get_agg_nums(all_results, min_cluster_size=5, step=100)
-
-    # compare_clustering(all_results, HERE / "clustering-comp.png")
-    # compare_val(all_results, HERE / "num-clusters-comp-new.png", "Num clusters")
-    # compare_val(all_results, HERE / "agg-num-comp-new.png", "Aggregation numbers")
-    # compare_val(all_results, HERE / "asp-num-comp.png", "Asphericities")
-    # compare_val(all_results, HERE / "aniso-num-comp.png", "Anisotropies")
-    # compare_dist(all_results, HERE / "aniso-dist-comp.png", "Anisotropies")
-    # compare_val(all_results, HERE / "acy-num-comp.png", "Acylindricities")
-    # compare_dist(
-    #     all_results, HERE / "acy-dist-comp.png", "Acylindricities", semilog=True
-    # )
-    # compare_dist(
-    #     all_results,
-    #     HERE / "agg-num-dist-comp.pdf",
-    #     "Aggregation numbers",
-    #     use_hue=False,
-    #     semilog=True,
-    # )
-    # compare_dist(all_results, HERE / "asp-dist-comp.png", "Asphericities", semilog=True)
-
-    # compare_dist(all_results, HERE / "mean-curv-dist-comp.png", "Mean curvatures")
-    # compare_dist(all_results, HERE / "g-curv-dist-comp.png", "Gaussian curvatures")
-    # compare_dist(all_results, HERE / "convex-dist-comp.pdf", "Convexities", ylim=(0, 1))
-    # compare_cpe(all_results, HERE / "cpe-comp.pdf")
-    # compare_dist(all_results, HERE / "eab-dist-comp.pdf", "Eab", rename="$e_{ab}$")
-
-    # compare_dist(
-    #     all_results, HERE / "surf-atom-dist-comp.pdf", "Surface atom ratio", ylim=(0, 1)
-    # )
-    # compare_dist(
-    #     all_results,
-    #     HERE / "surf-mol-dist-comp.pdf",
-    #     "Surface molecule ratio",
-    #     ylim=(0, 1),
-    # )
-    # compare_final_types(all_results, HERE / "final-types-comp.pdf")
-
-    # for result in all_results:
-    #     plot_agg_events(result)
