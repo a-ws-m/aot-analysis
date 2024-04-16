@@ -313,7 +313,7 @@ class MicelleAdjacency(AnalysisBase):
         cutoff: float = 4.5,
         verbose=True,
         min_cluster_size: int = 5,
-        properties: "set[AggregateProperties]" = AggregateProperties.all(),
+        properties: "set[AggregateProperties]" = AggregateProperties.fast(),
         coarse: bool = False,
         **kwargs,
     ):
