@@ -1,33 +1,57 @@
 Counterions:
-  ca: Ca2+
-  na: Na+
-
-Mappings:
-  coarse-alpha:
-    friendly_name: "Coarsest"
-    tail_match: "name C[MB][LR]"
-    cutoff: 0.5
-  mixed-alpha:
-    friendly_name: "Mixed"
-    tail_match: "name C[LR]*"
-    cutoff: 0.5
-  fine:
-    friendly_name: "Fine"
-    tail_match: "name T[LR]*"
-    cutoff: 0.5
+    ca: Ca2+
+    na: Na+
 
 AtomisticResults:
-  root: .
-  results:
-    - percent: 1
-      counterion: ca
-      tpr_path: 1-ca-no-water.tpr
-      traj_path: 1-ca-no-water.xtc
+    results:
+        - percent: 1
+          counterion: ca
+          tpr_file: 1-ca-no-water.tpr
+          traj_file: 1-ca-no-water.xtc
 
 CoarseResults:
-  root: .
-  results:
-    - percent: 1
-      counterion: na
-      tpr_path: 1_09-percent/no-water.tpr
-      traj_path: 1_09-percent/no-water.xtc
+    coarse-alpha:
+        friendly_name: "Coarsest"
+        tail_match: "name CB[LR]"
+        cutoff: 0.5
+        dirname: coarse-alpha-sa
+        results:
+            - percent: 1
+              tpr_file: 1_09-percent/aot-only-run.tpr
+              traj_file: 1_09-percent/aot-only-run.xtc
+            - percent: 7.2
+              tpr_file: 7_20-percent/aot-only-run.tpr
+              traj_file: 7_20-percent/aot-only-run.xtc
+            - percent: 20
+              tpr_file: 20_69-percent/aot-only-run.tpr
+              traj_file: 20_69-percent/aot-only-run.xtc
+    mixed-alpha:
+        friendly_name: "Mixed"
+        tail_match: "name C[LR]B[RO]"
+        cutoff: 0.5
+        dirname: mixed-alpha-sa
+        results:
+            - percent: 1
+              tpr_file: 0_98-percent/aot-only-run.tpr
+              traj_file: 0_98-percent/aot-only-run.xtc
+            - percent: 7.2
+              tpr_file: 7_19-percent/aot-only-run.tpr
+              traj_file: 7_19-percent/aot-only-run.xtc
+            - percent: 20
+              tpr_file: 20_05-percent/aot-only-run.tpr
+              traj_file: 20_05-percent/aot-only-run.xtc
+    fine:
+        friendly_name: "Fine"
+        tail_match: "name T[LR]B[RO]"
+        cutoff: 0.5
+        dirname: zeta-sa
+        results:
+            - percent: 1
+              tpr_file: 1_01-percent/aot-only-run.tpr
+              traj_file: 1_01-percent/aot-only-run.xtc
+            - percent: 7.2
+              tpr_file: 7_20-percent/aot-only-run.tpr
+              traj_file: 7_20-percent/aot-only-run.xtc
+            - percent: 20
+              tpr_file: 19_98-percent/aot-only-run.tpr
+              traj_file: 19_98-percent/aot-only-run.xtc

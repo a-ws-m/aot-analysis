@@ -430,7 +430,7 @@ class MicelleAdjacency(AnalysisBase):
 
             princ_moms = agg_residues.gyration_moments()
 
-            if self.properties.union(
+            if self.properties.intersection(
                 AggregateProperties.CONVEXITIES
                 | AggregateProperties.MEAN_CURVATURES
                 | AggregateProperties.GAUSSIAN_CURVATURES
@@ -440,13 +440,15 @@ class MicelleAdjacency(AnalysisBase):
                 self.mean_curvs.append(mean_curv)
                 self.g_curvs.append(G_curv)
 
-            if self.properties.union(AggregateProperties.EAB | AggregateProperties.EAC):
+            if self.properties.intersection(
+                AggregateProperties.EAB | AggregateProperties.EAC
+            ):
                 semiaxis = calc_semiaxis(agg_residues)
                 cpe = get_cpe(*semiaxis)
                 self.eabs.append(cpe[0])
                 self.eacs.append(cpe[1])
 
-            if self.properties.union(
+            if self.properties.intersection(
                 AggregateProperties.SURFACE_ATOM_RATIO
                 | AggregateProperties.NUM_SURFACE_MOLECULES
                 | AggregateProperties.SURFACE_MOLECULE_RATIO
@@ -476,25 +478,25 @@ class MicelleAdjacency(AnalysisBase):
 
     def _conclude(self):
         """Store results in DataFrame."""
-        self.df = pd.DataFrame(
-            {
-                "Frame": self.frame_counter,
-                "Time (ps)": self.time_counter,
-                "Aggregation numbers": self.agg_nums,
-                "Asphericities": self.asphericities,
-                "Acylindricities": self.acylindricities,
-                "Anisotropies": self.anisotropies,
-                "Convexities": self.convexities,
-                "Eab": self.eabs,
-                "Eac": self.eacs,
-                "Surface atom ratio": self.surface_atom_ratio,
-                "Num surface molecules": self.num_surface_mols,
-                "Surface molecule ratio": self.surface_mol_ratio,
-                "Surface atom types": self.surface_types,
-                "Mean curvatures": self.mean_curvs,
-                "Gaussian curvatures": self.g_curvs,
-            }
-        )
+        data = {
+            "Frame": self.frame_counter,
+            "Time (ps)": self.time_counter,
+            "Aggregation numbers": self.agg_nums,
+            "Asphericities": self.asphericities,
+            "Acylindricities": self.acylindricities,
+            "Anisotropies": self.anisotropies,
+            "Convexities": self.convexities,
+            "Eab": self.eabs,
+            "Eac": self.eacs,
+            "Surface atom ratio": self.surface_atom_ratio,
+            "Num surface molecules": self.num_surface_mols,
+            "Surface molecule ratio": self.surface_mol_ratio,
+            "Surface atom types": self.surface_types,
+            "Mean curvatures": self.mean_curvs,
+            "Gaussian curvatures": self.g_curvs,
+        }
+        data = {key: val for key, val in data.items() if val}
+        self.df = pd.DataFrame(data)
 
         surface_types_df = pd.DataFrame(self.surface_types)
         surface_types_df.fillna(0, inplace=True)
@@ -613,26 +615,31 @@ class ResultsYAML:
         }
 
         self.atomistic_results = []
-        for res in self.data["AtomisticResults"]["results"]:
-            res["percent_aot"] = float(res.pop("percent"))
-            res["counterion"] = self.counterions[res["counterion"]]
-            res["tpr_file"] = self.root / res["tpr_file"]
-            res["traj_file"] = self.root / res["traj_file"]
-            self.atomistic_results.append(AtomisticResults(**res))
+        if "AtomisticResults" in self.data:
+            for res in self.data["AtomisticResults"]["results"]:
+                res["percent_aot"] = float(res.pop("percent"))
+                res["Type"] = self.counterions[res["Type"]]
+                res["tpr_file"] = self.root / res["tpr_file"]
+                res["traj_file"] = self.root / res["traj_file"]
+                self.atomistic_results.append(AtomisticResults(**res))
 
         self.coarse_results = []
-        for mapping_name, data in self.data["CoarseResults"].items():
-            coarseness = Coarseness(
-                data["dirname"], mapping_name, data["tail_match"], data["cutoff"]
-            )
+        if "CoarseResults" in self.data:
+            for mapping_name, data in self.data["CoarseResults"].items():
+                coarseness = Coarseness(
+                    data["dirname"],
+                    data["friendly_name"],
+                    data["tail_match"],
+                    data["cutoff"],
+                )
 
-            rel_path = self.root / coarseness.dirname
-            for res in data["results"]:
-                res["percent_aot"] = float(res.pop("percent"))
-                res["coarseness"] = coarseness
-                res["tpr_file"] = rel_path / res["tpr_file"]
-                res["traj_file"] = rel_path / res["traj_file"]
-                self.coarse_results.append(CoarseResults(**res))
+                rel_path = self.root / coarseness.dirname
+                for res in data["results"]:
+                    res["percent_aot"] = float(res.pop("percent"))
+                    res["coarseness"] = coarseness
+                    res["tpr_file"] = rel_path / res["tpr_file"]
+                    res["traj_file"] = rel_path / res["traj_file"]
+                    self.coarse_results.append(CoarseResults(**res))
 
     def get_results(self) -> "list[AtomisticResults | CoarseResults]":
         return self.atomistic_results + self.coarse_results
@@ -785,7 +792,9 @@ def batch_ma_analysis(
         this_df["% AOT"] = this_df["% AOT"].astype("category")
         this_df["Simulation"] = result.plot_name
         if isinstance(result, AtomisticResults):
-            this_df["Counterion"] = result.counterion.longname
+            this_df["Type"] = result.counterion.longname
+        else:
+            this_df["Type"] = result.coarseness.friendly_name
 
         plot_df = pd.concat([plot_df, this_df], ignore_index=True)
 
@@ -910,8 +919,8 @@ def compare_val(
         x=TIME_COL,
         y=y_axis,
         col="% AOT",
-        row="Counterion",
-        hue="Counterion",
+        row="Type",
+        hue="Type",
         kind="line",
         errorbar="sd",
         facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
@@ -959,7 +968,7 @@ def compare_dist(
         order=time_labels,
         y=y_axis if not rename else rename,
         col="% AOT",
-        row="Counterion",
+        row="Type",
         hue="Log agg. num" if use_hue else None,
         kind="strip",
         # inner=None,
@@ -993,7 +1002,7 @@ def compare_final_types(
     plot_df = batch_ma_analysis(results, min_cluster_size, only_last=True)
     plot_df.drop(columns=MicelleAdjacency.NON_TYPE_COLS, inplace=True)
 
-    plot_df = plot_df.groupby(["Counterion", "% AOT"]).sum().reset_index()
+    plot_df = plot_df.groupby(["Type", "% AOT"]).sum().reset_index()
 
     print("Done analysing results!")
     print("Plotting graphs.")
@@ -1002,7 +1011,7 @@ def compare_final_types(
         data=plot_df,
         kind="bar",
         col="% AOT",
-        row="Counterion",
+        row="Type",
         sharey=True,
         facet_kws={"margin_titles": True, "despine": False},
     )
@@ -1045,7 +1054,7 @@ def compare_cpe(
         x=EAB,
         y=EAC,
         col="% AOT",
-        row="Counterion",
+        row="Type",
         hue="Log agg. num",
         facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
@@ -1125,30 +1134,33 @@ def compare_clustering(
     g.savefig(graph_file)
 
 
-def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10):
+def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0):
     """Plot the radial distribution between tail group beads."""
     plot_df = pd.DataFrame()
 
     for result in results:
         u = mda.Universe(result.tpr_file, result.traj_file)
-        u.transfer_to_memory(step=step)
         tail_atoms = u.select_atoms(result.tail_match)
         rdf = InterRDF(
-            tail_atoms, tail_atoms, norm="density", nbins=200, range=(2.5, 7), exclude_same="residue"
+            tail_atoms,
+            tail_atoms,
+            range=(2.5, 7),
+            nbins=100,
+            exclude_same="residue",
         )
-        rdf.run(verbose=True)
+        rdf.run(verbose=True, step=step, start=start)
 
         df = pd.DataFrame(
-            {r"Distance ($\AA$)": rdf.results.bins, r"$\rho$(n)": rdf.results.rdf}
+            {r"Distance ($\AA$)": rdf.results.bins, r"$g(r)$": rdf.results.rdf}
         )
         df["Mapping"] = result.coarseness.friendly_name
-        df["% AOT"] = result.percent_aot
+        df["% AOT"] = str(result.percent_aot)
         plot_df = pd.concat([plot_df, df], ignore_index=True)
 
     g = sns.relplot(
         data=plot_df,
         x=r"Distance ($\AA$)",
-        y=r"$\rho$(n)",
+        y=r"$g(r)$",
         col="Mapping",
         kind="line",
         hue="% AOT",
@@ -1156,6 +1168,7 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10):
     )
     g.tight_layout()
     g.savefig(graph_file, transparent=False)
+
 
 def main():
     """Commandline interface for program."""
@@ -1181,6 +1194,13 @@ def main():
         default=100,
         dest="step_size",
         help="Number of steps to skip in the trajectory.",
+    )
+    parser.add_argument(
+        "-s",
+        type=int,
+        default=0,
+        dest="start",
+        help="Start the analysis from this frame.",
     )
     parser.add_argument(
         "--rdf",
@@ -1233,9 +1253,12 @@ def main():
     results = results_yaml.get_results()
 
     if args.rdf:
+        sns.set_theme(context="talk", style="darkgrid")
         tail_rdf(
             [result for result in results if isinstance(result, CoarseResults)],
             WORKING_DIR / "tail-rdf.pdf",
+            step=args.step_size,
+            start=args.start,
         )
         return
 
