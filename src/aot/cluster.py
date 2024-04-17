@@ -1135,12 +1135,12 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10):
         u.transfer_to_memory(step=step)
         tail_atoms = u.select_atoms(result.tail_match)
         rdf = InterRDF(
-            tail_atoms, tail_atoms, nbins=200, range=(2.5, 7), exclude_same="residue"
+            tail_atoms, tail_atoms, norm="density", nbins=200, range=(2.5, 7), exclude_same="residue"
         )
         rdf.run(verbose=True)
 
         df = pd.DataFrame(
-            {r"Distance ($\AA$)": rdf.results.bins, "p(n)": rdf.results.rdf}
+            {r"Distance ($\AA$)": rdf.results.bins, r"$\rho$(n)": rdf.results.rdf}
         )
         df["Mapping"] = result.coarseness.friendly_name
         df["% AOT"] = result.percent_aot
@@ -1149,7 +1149,7 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10):
     g = sns.relplot(
         data=plot_df,
         x=r"Distance ($\AA$)",
-        y="p(n)",
+        y=r"$\rho$(n)",
         col="Mapping",
         kind="line",
         hue="% AOT",
