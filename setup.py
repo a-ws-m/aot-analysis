@@ -3,7 +3,7 @@ from setuptools import find_packages, setup
 setup(
     name="aot",
     version="0.1",
-    packages=find_packages(exclude="tests"),
+    packages=find_packages(include="aot"),
     license="MIT",
     author="Alex Moriarty",
     author_email="amoriarty14@gmail.com",
@@ -27,5 +27,8 @@ setup(
     classifiers=[
         # https://pypi.org/classifiers/
     ],
+    entry_points={
+        "console_scripts": ["aot_cluster=aot.cluster:main"],
+    },
     python_requires=">=3.7",
 )

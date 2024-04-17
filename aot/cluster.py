@@ -10,7 +10,6 @@ TODO:
 
 import argparse
 import random
-import sys
 from collections import Counter, defaultdict
 from enum import Enum
 
@@ -1158,8 +1157,8 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10):
     g.tight_layout()
     g.savefig(graph_file, transparent=False)
 
-
-if __name__ == "__main__":
+def main():
+    """Commandline interface for program."""
     sns.set_theme(context="talk", style="dark", palette="flare")
 
     parser = argparse.ArgumentParser()
@@ -1238,7 +1237,7 @@ if __name__ == "__main__":
             [result for result in results if isinstance(result, CoarseResults)],
             WORKING_DIR / "tail-rdf.pdf",
         )
-        sys.exit()
+        return
 
     batch_ma_analysis(results, min_cluster_size=5, step=args.step_size)
 
@@ -1264,3 +1263,7 @@ if __name__ == "__main__":
 
     if args.cpe:
         compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")
+
+
+if __name__ == "__main__":
+    main()
