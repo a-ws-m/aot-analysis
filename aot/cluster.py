@@ -547,6 +547,10 @@ class AtomisticResults(NamedTuple):
     def agg_adj_file(self) -> str:
         return f"{self.name}-agg-adj.gml"
 
+    def universe(self) -> mda.Universe:
+        """Get an MDAnalysis Universe for the simulation."""
+        return mda.Universe(self.tpr_file, self.traj_file)
+
 
 class Coarseness(NamedTuple):
     dirname: str
@@ -596,6 +600,10 @@ class CoarseResults(NamedTuple):
     @property
     def agg_adj_file(self) -> str:
         return f"{self.name}-agg-adj.gml"
+
+    def universe(self) -> mda.Universe:
+        """Get an MDAnalysis Universe for the simulation."""
+        return mda.Universe(self.tpr_file, self.traj_file)
 
 
 class ResultsYAML:
@@ -719,7 +727,7 @@ def all_atomistic_ma(
     result: AtomisticResults, min_cluster_size: int = 5, step: int = 1
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
-    u = mda.Universe(result.tpr_file, result.traj_file)
+    u = result.universe()
     if step > 1:
         u.transfer_to_memory(step=step)
 
@@ -739,7 +747,7 @@ def coarse_ma(
     result: CoarseResults, min_cluster_size: int = 5, step: int = 1
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
-    u = mda.Universe(result.tpr_file, result.traj_file)
+    u = result.universe()
     if step > 1:
         u.transfer_to_memory(step=step)
 
@@ -1139,7 +1147,7 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
     plot_df = pd.DataFrame()
 
     for result in results:
-        u = mda.Universe(result.tpr_file, result.traj_file)
+        u = result.universe()
         tail_atoms = u.select_atoms(result.tail_match)
         rdf = InterRDF(
             tail_atoms,
