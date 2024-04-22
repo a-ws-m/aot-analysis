@@ -767,6 +767,7 @@ def batch_ma_analysis(
     step: int = 1,
     only_last: bool = False,
     dir_: Path = Path("."),
+    overwrite: bool = False,
 ) -> pd.DataFrame:
     """Load MA results from disk or run analyses anew."""
     plot_df = pd.DataFrame()
@@ -774,7 +775,7 @@ def batch_ma_analysis(
         adj_path = dir_ / result.adj_file
         df_path = dir_ / result.df_file
 
-        if df_path.exists():
+        if not overwrite and df_path.exists():
             print(f"Found existing files for {result.plot_name}.")
             this_df = pd.read_csv(df_path, index_col=0)
 
@@ -1211,6 +1212,12 @@ def main():
         help="Start the analysis from this frame.",
     )
     parser.add_argument(
+        "-o",
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing files.",
+    )
+    parser.add_argument(
         "--rdf",
         action="store_true",
         help="Plot the RDFs between tail group beads and exit.",
@@ -1270,7 +1277,9 @@ def main():
         )
         return
 
-    batch_ma_analysis(results, min_cluster_size=5, step=args.step_size)
+    batch_ma_analysis(
+        results, min_cluster_size=5, step=args.step_size, overwrite=args.overwrite
+    )
 
     if args.clustering:
         compare_clustering(results, WORKING_DIR / "clustering-comp.png")
