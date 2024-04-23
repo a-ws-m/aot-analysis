@@ -633,7 +633,7 @@ class ResultsYAML:
 
         self.coarse_results = []
         if "CoarseResults" in self.data:
-            for mapping_name, data in self.data["CoarseResults"].items():
+            for data in self.data["CoarseResults"]["results"]:
                 coarseness = Coarseness(
                     data["dirname"],
                     data["friendly_name"],
