@@ -423,23 +423,13 @@ class MicelleAdjacency(AnalysisBase):
         )
         self.adj_mats.append(sparse_adj_arr)
 
-        _, connected_comps = connected_components(sparse_adj_arr, directed=False)
-
-        _, agg_indices, agg_nums = np.unique(
-            connected_comps, return_counts=True, return_index=True
+        n_aggregates, connected_comps = connected_components(
+            sparse_adj_arr, directed=False
         )
-        # agg_indices contains the index of the first molecule in each aggregate
 
-        for i, agg_num in zip(range(len(agg_indices)), agg_nums):
-            if agg_num < self.min_cluster_size:
-                continue
-
-            start_idx = agg_indices[i]
-            try:
-                end_idx = agg_indices[i + 1]
-                agg_residues = self.whole_molecules[start_idx:end_idx]
-            except IndexError:
-                agg_residues = self.whole_molecules[start_idx:]
+        for i in range(n_aggregates):
+            agg_residues = self.whole_molecules[np.where(connected_comps == i)]
+            agg_num = len(agg_residues)
 
             princ_moms = agg_residues.gyration_moments()
 
