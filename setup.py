@@ -28,7 +28,10 @@ setup(
         # https://pypi.org/classifiers/
     ],
     entry_points={
-        "console_scripts": ["aot_cluster=aot.cluster:main"],
+        "console_scripts": [
+            "aot_cluster=aot.cluster:main",
+            "aot_extract=scripts.extract_cluster:main",
+        ],
     },
     python_requires=">=3.7",
 )

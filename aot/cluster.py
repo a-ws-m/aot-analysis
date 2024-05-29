@@ -298,6 +298,31 @@ class AggregateProperties(Enum):
             raise TypeError
 
 
+def get_adj_array(
+    tailgroups: AtomGroup, cutoff: float, box_dim: np.ndarray
+) -> coo_array:
+    """Calculate the adjacency matrix for the current frame."""
+    atom_pairs = capped_distance(
+        tailgroups,
+        tailgroups,
+        cutoff,
+        box=box_dim,
+        return_distances=False,
+    )
+
+    num_surf = tailgroups.n_residues
+    atom_per_mol = int(len(tailgroups) / num_surf)
+
+    mol_pairs = atom_to_mol_pairs(atom_pairs, atom_per_mol)
+    num_pairs = mol_pairs.shape[0]
+    ones = np.ones((num_pairs,), dtype=np.bool_)
+    return coo_array(
+        (ones, (mol_pairs[:, 0], mol_pairs[:, 1])),
+        shape=(num_surf, num_surf),
+        dtype=np.bool_,
+    )
+
+
 class MicelleAdjacency(AnalysisBase):
     """Class for computing the adjacency matrix of surfactants in micelles."""
 
@@ -393,20 +418,8 @@ class MicelleAdjacency(AnalysisBase):
 
     def _single_frame(self):
         """Calculate the contact matrix for the current frame."""
-        atom_pairs = capped_distance(
-            self.tailgroups,
-            self.tailgroups,
-            self.cutoff,
-            box=self._ts.dimensions,
-            return_distances=False,
-        )
-        mol_pairs = atom_to_mol_pairs(atom_pairs, self.atom_per_mol)
-        num_pairs = mol_pairs.shape[0]
-        ones = np.ones((num_pairs,), dtype=np.bool_)
-        sparse_adj_arr = coo_array(
-            (ones, (mol_pairs[:, 0], mol_pairs[:, 1])),
-            shape=(self.num_surf, self.num_surf),
-            dtype=np.bool_,
+        sparse_adj_arr = get_adj_array(
+            self.tailgroups, self.cutoff, self._ts.dimensions
         )
         self.adj_mats.append(sparse_adj_arr)
 
