@@ -16,15 +16,6 @@ def get_clusters(
     """Get all of the clusters in the universe."""
     tailgroups = universe.select_atoms(tail_selection)
     sparse_adj_arr = get_adj_array(tailgroups, cutoff, universe.dimensions)
-    _, connected_comps = connected_components(sparse_adj_arr, directed=False)
-
-    _, agg_indices, agg_nums = np.unique(
-        connected_comps, return_counts=True, return_index=True
-    )
-    # agg_indices contains the index of the first molecule in each aggregate
-
-    tailgroups = universe.select_atoms(tail_selection)
-    sparse_adj_arr = get_adj_array(tailgroups, cutoff, universe.dimensions)
     n_aggregates, connected_comps = connected_components(sparse_adj_arr, directed=False)
 
     whole_molecules = tailgroups.residues
