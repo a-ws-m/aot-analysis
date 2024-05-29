@@ -14,7 +14,7 @@ def get_clusters(
     universe: mda.Universe, tail_selection: str, cutoff: float
 ) -> list[tuple[mda.ResidueGroup, int]]:
     """Get all of the clusters in the universe."""
-    tailgroups = univ.seelct_atoms(tail_selection)
+    tailgroups = universe.select_atoms(tail_selection)
     sparse_adj_arr = get_adj_array(tailgroups, cutoff, universe.dimensions)
     _, connected_comps = connected_components(sparse_adj_arr, directed=False)
 
@@ -23,29 +23,26 @@ def get_clusters(
     )
     # agg_indices contains the index of the first molecule in each aggregate
 
+    tailgroups = universe.select_atoms(tail_selection)
+    sparse_adj_arr = get_adj_array(tailgroups, cutoff, universe.dimensions)
+    n_aggregates, connected_comps = connected_components(sparse_adj_arr, directed=False)
+
     whole_molecules = tailgroups.residues
     clusters = []
-    for i, agg_num in zip(range(len(agg_indices)), agg_nums):
-        start_idx = agg_indices[i]
-        try:
-            end_idx = agg_indices[i + 1]
-            agg_residues = whole_molecules[start_idx:end_idx]
-        except IndexError:
-            agg_residues = whole_molecules[start_idx:]
-
-        clusters.append((agg_residues, agg_num))
+    for i in range(n_aggregates):
+        clustered_mols = whole_molecules[np.where(connected_comps == i)]
+        agg_num = len(clustered_mols)
+        clusters.append((clustered_mols, agg_num))
 
     return clusters
 
 
 def main():
     parser = ArgumentParser(description=__doc__)
-    parser.add_argument("struct", required=True, help="Structure file.")
+    parser.add_argument("struct", help="Structure file.")
+    parser.add_argument("tails", type=str, help="Tailgroup selection string.")
     parser.add_argument(
-        "tails", type=str, required=True, help="Tailgroup selection string."
-    )
-    parser.add_argument(
-        "cutoff", type=float, default=0.5, help="Cutoff for clustering."
+        "-c", "--cutoff", type=float, default=0.5, help="Cutoff for clustering."
     )
     parser.add_argument("-o", default="output.gro", help="Output file.")
     parser.add_argument("-i", type=int, help="Index of the cluster.")
