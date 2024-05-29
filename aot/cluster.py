@@ -626,7 +626,7 @@ class ResultsYAML:
         if "AtomisticResults" in self.data:
             for res in self.data["AtomisticResults"]["results"]:
                 res["percent_aot"] = float(res.pop("percent"))
-                res["Type"] = self.counterions[res["Type"]]
+                res["counterion"] = self.counterions[res["counterion"]]
                 res["tpr_file"] = self.root / res["tpr_file"]
                 res["traj_file"] = self.root / res["traj_file"]
                 self.atomistic_results.append(AtomisticResults(**res))
@@ -932,7 +932,9 @@ def compare_val(
         hue="Type",
         kind="line",
         errorbar="sd",
-        facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
+        margin_titles=True,
+        sharey="row",
+        # facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
     )
     g.tight_layout()
     g.savefig(graph_file, transparent=True)
@@ -960,8 +962,8 @@ def compare_dist(
     if use_interval:
         plot_df = plot_df[plot_df[TIME_COL] % interval == 0]
 
-    plot_df[TIME_COL] = plot_df[TIME_COL].apply(lambda x: f"{x:.0f}")
-    time_labels = sorted(plot_df[TIME_COL].unique(), key=lambda x: int(x))
+    # plot_df[TIME_COL] = plot_df[TIME_COL].apply(lambda x: f"{x:.0f}")
+    # time_labels = sorted(plot_df[TIME_COL].unique(), key=lambda x: int(x))
 
     plot_df["Log agg. num"] = plot_df["Aggregation numbers"].apply(np.log10)
 
@@ -974,15 +976,17 @@ def compare_dist(
     g = sns.catplot(
         data=plot_df,
         x=TIME_COL,
-        order=time_labels,
+        # order=time_labels,
         y=y_axis if not rename else rename,
         col="% AOT",
         row="Type",
         hue="Log agg. num" if use_hue else None,
+        native_scale=True,
         kind="strip",
         # inner=None,
         sharey=True,
-        facet_kws={"margin_titles": True, "despine": False},
+        margin_titles=True,
+        # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
     )
     # g.map_dataframe(
@@ -997,7 +1001,7 @@ def compare_dist(
     if ylim is not None:
         g.set(ylim=ylim)
 
-    g.set_xticklabels(time_labels, rotation=45)
+    # g.set_xticklabels(time_labels, rotation=45)
     g.tight_layout()
     g.savefig(graph_file, transparent=False)
 
@@ -1022,7 +1026,8 @@ def compare_final_types(
         col="% AOT",
         row="Type",
         sharey=True,
-        facet_kws={"margin_titles": True, "despine": False},
+        margin_titles=True,
+        # facet_kws={"margin_titles": True, "despine": False},
     )
 
     g.tight_layout()
@@ -1065,7 +1070,8 @@ def compare_cpe(
         col="% AOT",
         row="Type",
         hue="Log agg. num",
-        facet_kws={"margin_titles": True, "despine": False},
+        margin_titles=True,
+        # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
     )
     g.set(xlim=(0, 1), ylim=(0, 1))
@@ -1133,6 +1139,8 @@ def compare_clustering(
         row="variable",
         kind="line",
         errorbar="sd",
+        # margin_titles=True,
+        # sharey="row",
         facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
     )
 
@@ -1173,7 +1181,8 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
         col="Mapping",
         kind="line",
         hue="% AOT",
-        facet_kws={"margin_titles": True, "despine": False},
+        margin_titles=True,
+        # facet_kws={"margin_titles": True, "despine": False},
     )
     g.tight_layout()
     g.savefig(graph_file, transparent=False)
