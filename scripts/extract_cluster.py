@@ -35,9 +35,16 @@ def main():
     parser.add_argument(
         "-c", "--cutoff", type=float, default=0.5, help="Cutoff for clustering."
     )
-    parser.add_argument("-o", default="output.gro", help="Output file.")
+    parser.add_argument("-o", default="aggregate.gro", help="Output file.")
+    parser.add_argument(
+        "--min-size",
+        type=int,
+        help="Extract all clusters above this size. The index of each cluster will be appended to the end of the output file stem.",
+    )
     parser.add_argument("-i", type=int, help="Index of the cluster.")
     args = parser.parse_args()
+
+    output_file = Path(args.o)
 
     gro_file = Path(args.struct)
     if not gro_file.exists():
@@ -50,9 +57,23 @@ def main():
 
     if args.i is None:
         for i, (cluster, size) in enumerate(clusters):
-            print(f"Cluster {i}: {size} molecules")
+            if args.min_size is None:
+                print(f"Cluster {i}: {size} molecules")
+                continue
+            elif size >= args.min_size:
+                cluster, _ = clusters[i]
+                out_file = output_file.stem + f"_{i}" + output_file.suffix
+                cluster.atoms.write(out_file)
+            print(f"Cluster {i}, size {size} written to {out_file}")
 
-        cluster_idx = int(input("Enter the index of the cluster you want to extract: "))
+        if args.min_size is None:
+            cluster_idx = int(
+                input("Enter the index of the cluster you want to extract: ")
+            )
+        else:
+            # We've already written them all to disk
+            return
+
     else:
         cluster_idx = int(args.i)
 
