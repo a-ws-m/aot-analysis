@@ -485,6 +485,7 @@ class MicelleAdjacency(AnalysisBase):
             "Frame": self.frame_counter,
             "Time (ps)": self.time_counter,
             "Aggregation numbers": self.agg_nums,
+            "Normalised aggregation numbers": np.array(self.agg_nums) / self.num_surf,
             "Asphericities": self.asphericities,
             "Acylindricities": self.acylindricities,
             "Anisotropies": self.anisotropies,
@@ -498,7 +499,8 @@ class MicelleAdjacency(AnalysisBase):
             "Mean curvatures": self.mean_curvs,
             "Gaussian curvatures": self.g_curvs,
         }
-        data = {key: val for key, val in data.items() if val}
+        data = {key: val for key, val in data.items() if len(val)}
+
         self.df = pd.DataFrame(data)
 
         surface_types_df = pd.DataFrame(self.surface_types)
@@ -724,9 +726,9 @@ def batch_ma_analysis(
             this_df = ma.df
 
         if only_last:
-            this_df = this_df[this_df["Frame"] == this_df["Frame"].max()]
+            this_df = this_df.loc[this_df["Frame"] == this_df["Frame"].max()]
 
-        this_df = this_df[this_df["Aggregation numbers"] >= min_cluster_size]
+        this_df = this_df.loc[this_df["Aggregation numbers"] >= min_cluster_size]
         # TODO: Curvatures are lists of lists, so we need to do something about that
         # this_df = this_df.groupby("Time (ps)").mean()
         # this_df["Time (ps)"] = this_df.index
@@ -787,6 +789,7 @@ def compare_dist(
     semilog: bool = False,
     use_hue: bool = True,
     rename: Optional[str] = None,
+    marker: str = ".",
 ):
     """Compare the clustering behaviour of several simulations."""
     plot_df = batch_ma_analysis(results, min_cluster_size)
@@ -824,6 +827,7 @@ def compare_dist(
         margin_titles=True,
         # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
+        marker=marker,
     )
     # g.map_dataframe(
     #     sns.swarmplot,
@@ -1073,11 +1077,11 @@ def main():
         action="store_true",
         help="Compare the clustering behaviour of several simulations.",
     )
-    plot_options.add_argument(
-        "--num-clusters",
-        action="store_true",
-        help="Compare the number of clusters in several simulations.",
-    )
+    # plot_options.add_argument(
+    #     "--num-clusters",
+    #     action="store_true",
+    #     help="Compare the number of clusters in several simulations.",
+    # )
     plot_options.add_argument(
         "--agg-num",
         action="store_true",
@@ -1129,12 +1133,17 @@ def main():
     if args.clustering:
         compare_clustering(results, WORKING_DIR / "clustering-comp.png")
 
-    if args.num_clusters:
-        compare_val(results, WORKING_DIR / "num-clusters-comp-new.png", "Num clusters")
+    # if args.num_clusters:
+    #     compare_val(results, WORKING_DIR / "num-clusters-comp-new.png", "Num clusters")
 
     if args.agg_num:
         compare_dist(
-            results, WORKING_DIR / "agg-num-comp-new.png", "Aggregation numbers"
+            results,
+            WORKING_DIR / "agg-num-comp.png",
+            "Normalised aggregation numbers",
+            ylim=(0, 1.01),
+            use_hue=False,
+            marker="P",
         )
 
     if args.asp_num:
