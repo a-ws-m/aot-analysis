@@ -121,6 +121,28 @@ def anisotropy(principal_moments: np.ndarray) -> float:
     ) - (1 / 2)
 
 
+def radgyr(atomgroup, masses, total_mass=None):
+    # coordinates change for each frame
+    coordinates = atomgroup.positions
+    center_of_mass = atomgroup.center_of_mass()
+
+    # get squared distance from center
+    ri_sq = (coordinates - center_of_mass) ** 2
+    # sum the unweighted positions
+    sq = np.sum(ri_sq, axis=1)
+    sq_x = np.sum(ri_sq[:, [1, 2]], axis=1)  # sum over y and z
+    sq_y = np.sum(ri_sq[:, [0, 2]], axis=1)  # sum over x and z
+    sq_z = np.sum(ri_sq[:, [0, 1]], axis=1)  # sum over x and y
+
+    # make into array
+    sq_rs = np.array([sq, sq_x, sq_y, sq_z])
+
+    # weight positions
+    rog_sq = np.sum(masses * sq_rs, axis=1) / total_mass
+    # square root and return
+    return np.sqrt(rog_sq)
+
+
 def get_conv(
     group: AtomGroup, radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP)
 ) -> "tuple[float, list[float], list[float]]":
@@ -248,6 +270,7 @@ class AggregateProperties(Enum):
     SURFACE_ATOM_TYPES = "Surface atom types"
     MEAN_CURVATURES = "Mean curvatures"
     GAUSSIAN_CURVATURES = "Gaussian curvatures"
+    RADIUS_OF_GYRATION = "Radius of gyration"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
@@ -267,6 +290,7 @@ class AggregateProperties(Enum):
             cls.SURFACE_ATOM_RATIO,
             cls.NUM_SURFACE_MOLECULES,
             cls.SURFACE_MOLECULE_RATIO,
+            cls.RADIUS_OF_GYRATION,
         }
 
     @classmethod
@@ -341,6 +365,7 @@ class MicelleAdjacency(AnalysisBase):
         "Surface molecule ratio",
         "Mean curvatures",
         "Gaussian curvatures",
+        "Radius of gyration",
     ]
 
     def __init__(
@@ -415,6 +440,7 @@ class MicelleAdjacency(AnalysisBase):
         self.asphericities: list[float] = []
         self.acylindricities: list[float] = []
         self.anisotropies: list[float] = []
+        self.radii_of_gyration: list[float] = []
 
     def _single_frame(self):
         """Calculate the contact matrix for the current frame."""
@@ -474,6 +500,15 @@ class MicelleAdjacency(AnalysisBase):
             if AggregateProperties.ANISOTROPIES in self.properties:
                 self.anisotropies.append(anisotropy(princ_moms))
 
+            if AggregateProperties.RADIUS_OF_GYRATION in self.properties:
+                self.radii_of_gyration.append(
+                    radgyr(
+                        agg_residues.atoms,
+                        agg_residues.atoms.masses,
+                        agg_residues.atoms.total_mass(),
+                    )
+                )
+
             self.agg_nums.append(agg_num)
 
             self.frame_counter.append(self._ts.frame)
@@ -498,6 +533,7 @@ class MicelleAdjacency(AnalysisBase):
             "Surface atom types": self.surface_types,
             "Mean curvatures": self.mean_curvs,
             "Gaussian curvatures": self.g_curvs,
+            "Radius of gyration": self.radii_of_gyration,
         }
         data = {key: val for key, val in data.items() if len(val)}
 
@@ -1103,6 +1139,11 @@ def main():
         help="Compare the acylindricities in several simulations.",
     )
     plot_options.add_argument(
+        "--rog",
+        action="store_true",
+        help="Compare the radius of gyration in several simulations.",
+    )
+    plot_options.add_argument(
         "--cpe",
         action="store_true",
         help="Compare the coordinate-pair eccentricities in several simulations.",
@@ -1157,6 +1198,14 @@ def main():
 
     if args.cpe:
         compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")
+
+    if args.rog:
+        compare_dist(
+            results,
+            WORKING_DIR / "rog-comp.png",
+            "Radius of gyration",
+            rename="Radius of gyration ($\\A$)",
+        )
 
 
 if __name__ == "__main__":
