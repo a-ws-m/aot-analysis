@@ -121,28 +121,6 @@ def anisotropy(principal_moments: np.ndarray) -> float:
     ) - (1 / 2)
 
 
-def radgyr(atomgroup, masses, total_mass=None):
-    # coordinates change for each frame
-    coordinates = atomgroup.positions
-    center_of_mass = atomgroup.center_of_mass()
-
-    # get squared distance from center
-    ri_sq = (coordinates - center_of_mass) ** 2
-    # sum the unweighted positions
-    sq = np.sum(ri_sq, axis=1)
-    sq_x = np.sum(ri_sq[:, [1, 2]], axis=1)  # sum over y and z
-    sq_y = np.sum(ri_sq[:, [0, 2]], axis=1)  # sum over x and z
-    sq_z = np.sum(ri_sq[:, [0, 1]], axis=1)  # sum over x and y
-
-    # make into array
-    sq_rs = np.array([sq, sq_x, sq_y, sq_z])
-
-    # weight positions
-    rog_sq = np.sum(masses * sq_rs, axis=1) / total_mass
-    # square root and return
-    return np.sqrt(rog_sq)
-
-
 def get_conv(
     group: AtomGroup, radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP)
 ) -> "tuple[float, list[float], list[float]]":
@@ -181,6 +159,40 @@ def get_conv(
     G_curv = poly.curvature(curv_type="Gaussian")
 
     return convexity, mean_curv, G_curv
+
+
+def willard_chandler(
+    group: AtomGroup, radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP)
+) -> "tuple[float, float]":
+    """Calculate the Willard-Chandler surface for a given group of atoms and associated properties."""
+    u = group.universe
+
+    # Get the surface
+    wc = pytim.WillardChandler(
+        u,
+        group=group,
+        alpha=3.0,
+        mesh=2.0,
+        fast=True,
+        radii_dict=radii_dict,
+        autoassign=False,
+        density_cutoff=0.016,
+    )
+
+    # radius, _, _, _ = pytim.utilities.fit_sphere(wc.triangulated_surface[0])
+
+    # converting PyTim to PyVista surface
+    verts = wc.triangulated_surface[0]
+    faces = wc.triangulated_surface[1]
+    threes = 3 * np.ones((faces.shape[0], 1), dtype=int)
+    faces = np.concatenate((threes, faces), axis=1)
+    poly = pv.PolyData(verts, faces)
+
+    # Get actual surface volume
+    volume = poly.volume
+    surf = poly.area
+
+    return volume, surf
 
 
 def get_surface(
@@ -271,6 +283,8 @@ class AggregateProperties(Enum):
     MEAN_CURVATURES = "Mean curvatures"
     GAUSSIAN_CURVATURES = "Gaussian curvatures"
     RADIUS_OF_GYRATION = "Radius of gyration"
+    VOLUME = "Volume"
+    SURFACE_AREA = "Surface area"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
@@ -291,6 +305,8 @@ class AggregateProperties(Enum):
             cls.NUM_SURFACE_MOLECULES,
             cls.SURFACE_MOLECULE_RATIO,
             cls.RADIUS_OF_GYRATION,
+            cls.VOLUME,
+            cls.SURFACE_AREA,
         }
 
     @classmethod
@@ -302,6 +318,8 @@ class AggregateProperties(Enum):
                 cls.SURFACE_ATOM_TYPES,
                 cls.CONVEXITIES,
                 cls.NUM_SURFACE_MOLECULES,
+                cls.VOLUME,
+                cls.SURFACE_AREA,
             }
         )
 
@@ -366,6 +384,8 @@ class MicelleAdjacency(AnalysisBase):
         "Mean curvatures",
         "Gaussian curvatures",
         "Radius of gyration",
+        "Surface area",
+        "Volume",
     ]
 
     def __init__(
@@ -383,13 +403,20 @@ class MicelleAdjacency(AnalysisBase):
         super().__init__(trajectory, verbose, **kwargs)
 
         self.cutoff = cutoff
-        self.tailgroups = tailgroups
         self.min_cluster_size = min_cluster_size
         self.properties = properties
         self.coarse = coarse
 
         self.num_surf: int = tailgroups.n_residues
-        self.whole_molecules: ResidueGroup = tailgroups.residues
+        self.whole_molecules: ResidueGroup = tailgroups.residues.unique
+
+        # Sort the tailgroups by residue number
+        tailgroups_ = tailgroups.universe.atoms[[]]
+        for residue in self.whole_molecules:
+            tailgroups_ += residue.atoms & tailgroups
+        self.tailgroups = tailgroups_
+        assert len(self.tailgroups) == len(tailgroups)
+
         self.atom_per_mol = int(len(self.tailgroups) / self.num_surf)
 
     @cached_property
@@ -399,12 +426,12 @@ class MicelleAdjacency(AnalysisBase):
             radii = dict()
             for atom in self.tailgroups.universe.atoms:
                 # See Section 8.2 of
-                # http://cgmartini.nl/index.php/martini-3-tutorials/parameterizing-a-new-small-molecule
+                # https://cgmartini.nl/docs/tutorials/Martini3/Small_Molecule_Parametrization/#molecular-volume-and-shape
                 atom_type = atom.type[0]
                 if atom_type == "S":
-                    radius = 0.225
+                    radius = 0.230
                 elif atom_type == "T":
-                    radius = 0.185
+                    radius = 0.191
                 else:
                     radius = 0.264
 
@@ -426,6 +453,9 @@ class MicelleAdjacency(AnalysisBase):
         self.convexities: list[float] = []
         self.mean_curvs: list[list[float]] = []
         self.g_curvs: list[list[float]] = []
+
+        self.volume: list[float] = []
+        self.surface: list[float] = []
 
         # Coordinate pair eccentricities
         self.eabs: list[float] = []
@@ -457,6 +487,9 @@ class MicelleAdjacency(AnalysisBase):
             agg_residues = self.whole_molecules[np.where(connected_comps == i)]
             agg_num = len(agg_residues)
 
+            if agg_num < self.min_cluster_size:
+                continue
+
             princ_moms = agg_residues.gyration_moments()
 
             if self.properties.intersection(
@@ -468,6 +501,13 @@ class MicelleAdjacency(AnalysisBase):
                 self.convexities.append(conv)
                 self.mean_curvs.append(mean_curv)
                 self.g_curvs.append(G_curv)
+
+            if self.properties.intersection(
+                AggregateProperties.VOLUME | AggregateProperties.SURFACE_AREA
+            ):
+                vol, surf = willard_chandler(agg_residues.atoms, self.vdwradii)
+                self.volume.append(vol)
+                self.surface.append(surf)
 
             if self.properties.intersection(
                 AggregateProperties.EAB | AggregateProperties.EAC
@@ -501,13 +541,7 @@ class MicelleAdjacency(AnalysisBase):
                 self.anisotropies.append(anisotropy(princ_moms))
 
             if AggregateProperties.RADIUS_OF_GYRATION in self.properties:
-                self.radii_of_gyration.append(
-                    radgyr(
-                        agg_residues.atoms,
-                        agg_residues.atoms.masses,
-                        agg_residues.atoms.total_mass(),
-                    )
-                )
+                self.radii_of_gyration.append(agg_residues.radius_of_gyration())
 
             self.agg_nums.append(agg_num)
 
@@ -534,6 +568,8 @@ class MicelleAdjacency(AnalysisBase):
             "Mean curvatures": self.mean_curvs,
             "Gaussian curvatures": self.g_curvs,
             "Radius of gyration": self.radii_of_gyration,
+            "Volume": self.volume,
+            "Surface area": self.surface,
         }
         data = {key: val for key, val in data.items() if len(val)}
 
@@ -695,7 +731,10 @@ class ResultsYAML:
 
 
 def all_atomistic_ma(
-    result: AtomisticResults, min_cluster_size: int = 5, step: int = 1
+    result: AtomisticResults,
+    min_cluster_size: int = 5,
+    step: int = 1,
+    properties: "set[AggregateProperties]" = AggregateProperties.fast(),
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = result.universe()
@@ -708,14 +747,19 @@ def all_atomistic_ma(
     sel_str = " or ".join([f"name {name}" for name in tail_atom_names])
     end_atoms = u.select_atoms(sel_str)
 
-    ma = MicelleAdjacency(end_atoms, min_cluster_size=min_cluster_size)
+    ma = MicelleAdjacency(
+        end_atoms, min_cluster_size=min_cluster_size, properties=properties
+    )
     ma.run()
 
     return ma
 
 
 def coarse_ma(
-    result: CoarseResults, min_cluster_size: int = 5, step: int = 1
+    result: CoarseResults,
+    min_cluster_size: int = 5,
+    step: int = 1,
+    properties: "set[AggregateProperties]" = AggregateProperties.fast(),
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = result.universe()
@@ -725,7 +769,11 @@ def coarse_ma(
     tail_atoms = u.select_atoms(result.tail_match)
 
     ma = MicelleAdjacency(
-        tail_atoms, cutoff=result.cutoff, min_cluster_size=min_cluster_size, coarse=True
+        tail_atoms,
+        cutoff=result.cutoff,
+        min_cluster_size=min_cluster_size,
+        coarse=True,
+        properties=properties,
     )
     ma.run()
 
@@ -739,6 +787,7 @@ def batch_ma_analysis(
     only_last: bool = False,
     dir_: Path = Path("."),
     overwrite: bool = False,
+    properties: "set[AggregateProperties]" = AggregateProperties.fast(),
 ) -> pd.DataFrame:
     """Load MA results from disk or run analyses anew."""
     plot_df = pd.DataFrame()
@@ -754,9 +803,11 @@ def batch_ma_analysis(
             print(f"Analysing {result.plot_name} results.")
 
             if isinstance(result, CoarseResults):
-                ma = coarse_ma(result, min_cluster_size, step)
+                ma = coarse_ma(result, min_cluster_size, step, properties=properties)
             else:
-                ma = all_atomistic_ma(result, min_cluster_size, step)
+                ma = all_atomistic_ma(
+                    result, min_cluster_size, step, properties=properties
+                )
             ma.save(adj_path, df_path)
 
             this_df = ma.df
@@ -786,9 +837,10 @@ def compare_val(
     graph_file: Path,
     y_axis: str,
     min_cluster_size: int = 5,
+    overwrite=False,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = batch_ma_analysis(results, min_cluster_size)
+    plot_df = batch_ma_analysis(results, min_cluster_size, overwrite=overwrite)
 
     TIME_COL = "Time (ns)"
     plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
@@ -806,9 +858,9 @@ def compare_val(
         hue="Type",
         kind="line",
         errorbar="sd",
-        margin_titles=True,
-        sharey="row",
-        # facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
+        # margin_titles=True,
+        # sharey="row",
+        facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
     )
     g.tight_layout()
     g.savefig(graph_file, transparent=True)
@@ -823,9 +875,9 @@ def compare_dist(
     min_cluster_size: int = 5,
     ylim: Optional["tuple[float, float]"] = None,
     semilog: bool = False,
-    use_hue: bool = True,
+    hue="Norm. agg. number",
     rename: Optional[str] = None,
-    marker: str = ".",
+    marker: str = "P",
 ):
     """Compare the clustering behaviour of several simulations."""
     plot_df = batch_ma_analysis(results, min_cluster_size)
@@ -841,6 +893,11 @@ def compare_dist(
     # time_labels = sorted(plot_df[TIME_COL].unique(), key=lambda x: int(x))
 
     plot_df["Log agg. num"] = plot_df["Aggregation numbers"].apply(np.log10)
+    plot_df["Norm. agg. number"] = plot_df["Normalised aggregation numbers"]
+    try:
+        plot_df["Surface area / Volume"] = plot_df["Surface area"] / plot_df["Volume"]
+    except KeyError:
+        pass
 
     if rename is not None:
         plot_df[rename] = plot_df[y_axis]
@@ -855,7 +912,7 @@ def compare_dist(
         y=y_axis if not rename else rename,
         col="% AOT",
         row="Type",
-        hue="Log agg. num" if use_hue else None,
+        hue=hue,
         native_scale=True,
         kind="strip",
         # inner=None,
@@ -1148,6 +1205,21 @@ def main():
         action="store_true",
         help="Compare the coordinate-pair eccentricities in several simulations.",
     )
+    plot_options.add_argument(
+        "--vol",
+        action="store_true",
+        help="Compare the aggregate volumes in several simulations.",
+    )
+    plot_options.add_argument(
+        "--surf",
+        action="store_true",
+        help="Compare the surface areas in several simulations.",
+    )
+    plot_options.add_argument(
+        "--sa-ratio",
+        action="store_true",
+        help="Compare the surface area to volume ratio in several simulations.",
+    )
     args = parser.parse_args()
 
     WORKING_DIR = Path(args.dir)
@@ -1167,8 +1239,16 @@ def main():
         )
         return
 
+    properties = AggregateProperties.fast()
+    if args.vol or args.surf or args.sa_ratio:
+        properties |= {AggregateProperties.VOLUME, AggregateProperties.SURFACE_AREA}
+
     batch_ma_analysis(
-        results, min_cluster_size=5, step=args.step_size, overwrite=args.overwrite
+        results,
+        min_cluster_size=5,
+        step=args.step_size,
+        overwrite=args.overwrite,
+        properties=properties,
     )
 
     if args.clustering:
@@ -1183,8 +1263,7 @@ def main():
             WORKING_DIR / "agg-num-comp.png",
             "Normalised aggregation numbers",
             ylim=(0, 1.01),
-            use_hue=False,
-            marker="P",
+            hue=None,
         )
 
     if args.asp_num:
@@ -1200,11 +1279,36 @@ def main():
         compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")
 
     if args.rog:
-        compare_dist(
+        compare_val(
             results,
             WORKING_DIR / "rog-comp.png",
             "Radius of gyration",
-            rename="Radius of gyration ($\\A$)",
+            overwrite=args.overwrite,
+        )
+
+    if args.vol:
+        compare_dist(
+            results,
+            WORKING_DIR / "vol-comp.png",
+            "Volume",
+            rename="Volume ($\\AA^3$)",
+        )
+
+    if args.surf:
+        compare_dist(
+            results,
+            WORKING_DIR / "surf-comp.png",
+            "Surface area",
+            rename="Surface area ($\\AA^2$)",
+        )
+
+    if args.sa_ratio:
+        compare_dist(
+            results,
+            WORKING_DIR / "sa-ratio-comp.png",
+            "Surface area / Volume",
+            rename="Surface area / Volume ($\\AA^{-1}$)",
+            ylim=(0, 1),
         )
 
 
