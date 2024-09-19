@@ -391,7 +391,7 @@ class MicelleAdjacency(AnalysisBase):
     def __init__(
         self,
         tailgroups: AtomGroup,
-        cutoff: float = 4.5,
+        cutoff: float = 4.25,
         verbose=True,
         min_cluster_size: int = 5,
         properties: "set[AggregateProperties]" = AggregateProperties.fast(),
@@ -1114,8 +1114,8 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
         col="Mapping",
         kind="line",
         hue="% AOT",
-        margin_titles=True,
-        # facet_kws={"margin_titles": True, "despine": False},
+        # margin_titles=True,
+        facet_kws={"margin_titles": True, "despine": False},
     )
     g.tight_layout()
     g.savefig(graph_file, transparent=False)
