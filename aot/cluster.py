@@ -177,6 +177,7 @@ def willard_chandler(
         radii_dict=radii_dict,
         autoassign=False,
         density_cutoff=0.016,
+        centered=True,
     )
 
     # radius, _, _, _ = pytim.utilities.fit_sphere(wc.triangulated_surface[0])
@@ -440,7 +441,7 @@ class MicelleAdjacency(AnalysisBase):
             return radii
 
         else:
-            return pytim_data.vdwradii(CHARMM36_TOP)
+            return pytim_data.vdwradii(CHARMM27_TOP)
 
     def _prepare(self):
         """Initialise the results."""
@@ -894,6 +895,9 @@ def compare_dist(
 
     plot_df["Log agg. num"] = plot_df["Aggregation numbers"].apply(np.log10)
     plot_df["Norm. agg. number"] = plot_df["Normalised aggregation numbers"]
+    plot_df["Surfactant surface area"] = (
+        plot_df["Surface area"] / plot_df["Aggregation numbers"]
+    )
     try:
         plot_df["Surface area / Volume"] = plot_df["Surface area"] / plot_df["Volume"]
     except KeyError:
@@ -1003,8 +1007,8 @@ def compare_cpe(
         col="% AOT",
         row="Type",
         hue="Log agg. num",
-        margin_titles=True,
-        # facet_kws={"margin_titles": True, "despine": False},
+        # margin_titles=True,
+        facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
     )
     g.set(xlim=(0, 1), ylim=(0, 1))
@@ -1300,6 +1304,12 @@ def main():
             WORKING_DIR / "surf-comp.png",
             "Surface area",
             rename="Surface area ($\\AA^2$)",
+        )
+        compare_dist(
+            results,
+            WORKING_DIR / "norm-surf-comp.png",
+            "Surfactant surface area",
+            rename="Surface area per surfactant ($\\AA^2$)",
         )
 
     if args.sa_ratio:
