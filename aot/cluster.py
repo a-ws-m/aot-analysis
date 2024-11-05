@@ -840,7 +840,7 @@ def compare_dist(
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
 
     if rename is not None:
-        plot_df.loc[rename] = plot_df[y_axis]
+        plot_df[rename] = plot_df[y_axis]
 
     print("Done analysing results!")
     print("Plotting graphs.")
