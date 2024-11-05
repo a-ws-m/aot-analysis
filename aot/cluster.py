@@ -49,6 +49,11 @@ EAB = "$e_{ab}$"
 EAC = "$e_{ac}$"
 
 
+def center_on_cluster(cluster: AtomGroup):
+    """Center the universe on a specific cluster to avoid PBC issues."""
+    Interface.center_system("spherical", cluster, None)
+
+
 def atom_to_mol_pairs(atom_pairs: np.ndarray, atom_per_mol: int) -> np.ndarray:
     """Convert an array of atom pairs to an array of molecule pairs."""
     # These are already sorted, so a floor division will give us the molecule idxs
@@ -102,7 +107,14 @@ def load_sparse(file) -> dict[int, coo_array]:
 
 def hydrodynamic_radius(group: AtomGroup) -> float:
     """Calculate the hydrodynamic radius for a given group of atoms."""
+    center_on_cluster(group)
     return 1 / ((1 / len(group) ** 2) * np.sum(1 / pdist(group.positions)))
+
+
+def radius_of_gyration(group: AtomGroup) -> float:
+    """Calculate the radius of gyration for a given group of atoms."""
+    center_on_cluster(group)
+    return group.radius_of_gyration()
 
 
 def willard_chandler(
@@ -144,9 +156,9 @@ def get_cpe(atoms: AtomGroup):
     Compute coordinate pair eccentricities for a given set of semi-axes.
     Returns 2 values, eab and eac, both on [0,1]
     """
-    # moments_val for the MoI themselves, princ_vec for the vector directions
-    Interface.center_system("spherical", atoms, None)
+    center_on_cluster(atoms)
 
+    # moments_val for the MoI themselves, princ_vec for the vector directions
     moments_val, princ_vec = np.linalg.eig(atoms.moment_of_inertia())
 
     # getting mass of the selected group of atoms
@@ -404,11 +416,13 @@ class MicelleAdjacency(AnalysisBase):
                 AggregateProperties.RADIUS_OF_GYRATION, current_agg_entry
             ):
                 if current_idx is None:
-                    self.radii_of_gyration.append(agg_residues.radius_of_gyration())
+                    self.radii_of_gyration.append(
+                        radius_of_gyration(agg_residues.atoms)
+                    )
                 else:
                     self.df.loc[
                         current_idx, AggregateProperties.RADIUS_OF_GYRATION.value
-                    ] = agg_residues.radius_of_gyration()
+                    ] = radius_of_gyration(agg_residues.atoms)
 
             if self.do_calculate(
                 AggregateProperties.HYDRODYNAMIC_RADIUS, current_agg_entry
@@ -810,7 +824,7 @@ def compare_dist(
     results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     y_axis: str,
-    use_interval: bool = False,
+    use_interval: bool = True,
     interval: int = 50,
     min_cluster_size: int = 5,
     ylim: Optional["tuple[float, float]"] = None,
@@ -826,7 +840,7 @@ def compare_dist(
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
 
     if rename is not None:
-        plot_df[rename] = plot_df[y_axis]
+        plot_df.loc[rename] = plot_df[y_axis]
 
     print("Done analysing results!")
     print("Plotting graphs.")
@@ -1114,7 +1128,6 @@ def main():
             results,
             WORKING_DIR / "rog-comp.pdf",
             "Radius of gyration",
-            overwrite=args.overwrite,
         )
 
     if args.vol:
