@@ -33,6 +33,7 @@ from MDAnalysis.analysis.distances import capped_distance
 from MDAnalysis.analysis.rdf import InterRDF
 from MDAnalysis.core.groups import ResidueGroup
 from pytim.datafiles import CHARMM27_TOP, pytim_data
+from pytim.interface import Interface
 from scipy.spatial.distance import pdist
 
 try:
@@ -144,6 +145,8 @@ def get_cpe(atoms: AtomGroup):
     Returns 2 values, eab and eac, both on [0,1]
     """
     # moments_val for the MoI themselves, princ_vec for the vector directions
+    Interface.center_system("spherical", atoms, None)
+
     moments_val, princ_vec = np.linalg.eig(atoms.moment_of_inertia())
 
     # getting mass of the selected group of atoms
@@ -446,6 +449,7 @@ class MicelleAdjacency(AnalysisBase):
         data = {key: val for key, val in data.items() if len(val)}
 
         self.df = pd.concat([self.df, pd.DataFrame(data)], ignore_index=True)
+        self.df.sort_values("Frame", inplace=True, ignore_index=True)
 
     def save(self, adj_path: Path, df_path: Path):
         save_sparse(self.adj_mats, adj_path)
@@ -807,7 +811,7 @@ def compare_dist(
     graph_file: Path,
     y_axis: str,
     use_interval: bool = False,
-    interval: float = 20.0,
+    interval: int = 50,
     min_cluster_size: int = 5,
     ylim: Optional["tuple[float, float]"] = None,
     semilog: bool = False,
@@ -819,7 +823,7 @@ def compare_dist(
     plot_df = load_results_datasets(tuple(results), min_cluster_size)
 
     if use_interval:
-        plot_df = plot_df[plot_df[TIME_COL] % interval == 0]
+        plot_df = plot_df[plot_df["Frame"] % interval == 0]
 
     if rename is not None:
         plot_df[rename] = plot_df[y_axis]
@@ -864,15 +868,15 @@ def compare_dist(
 def compare_cpe(
     results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
-    use_interval: bool = True,
-    interval: float = 20.0,
+    use_interval: bool = False,
+    interval: int = 50,
     min_cluster_size: int = 5,
 ):
     """Compare the clustering behaviour of several simulations."""
     plot_df = load_results_datasets(tuple(results), min_cluster_size)
 
     if use_interval:
-        plot_df = plot_df[plot_df[TIME_COL] % interval == 0]
+        plot_df = plot_df[plot_df["Frame"] % interval == 0]
 
     print("Done analysing results!")
     print("Plotting graphs.")
