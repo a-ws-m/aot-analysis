@@ -138,20 +138,20 @@ def willard_chandler(
     return volume, surf
 
 
-def calc_semiaxis(atoms: AtomGroup):
+def get_cpe(atoms: AtomGroup):
     """
-    Computes the semi-axes for a given selection of atoms in MD traj.
-
-    Returns the semi-axis lengths as a numpy array from largest to smallest (a,
-    b, c). Lengths have same units as MDAnalysis, default of Angstroms unless
-    you specify otherwise
-
+    Compute coordinate pair eccentricities for a given set of semi-axes.
+    Returns 2 values, eab and eac, both on [0,1]
     """
+    # moments_val for the MoI themselves, princ_vec for the vector directions
     moments_val, princ_vec = np.linalg.eig(atoms.moment_of_inertia())
-    micelle_mass = atoms.total_mass()
+
+    # getting mass of the selected group of atoms
+    mass = atoms.total_mass()
 
     # sortinng MoI and vectors by size of MoI
     idx = moments_val.argsort()[::-1]
+
     moments_val = moments_val[idx]
     princ_vec = princ_vec[:, idx]
 
@@ -159,25 +159,12 @@ def calc_semiaxis(atoms: AtomGroup):
     inverter = np.array([[-1, 1, 1], [1, -1, 1], [1, 1, -1]]) * 0.5
 
     # converting MoI to axis length eigenvalues
-    semiaxis = np.sqrt(
-        (5 / micelle_mass) * (np.matmul(inverter, np.transpose(moments_val)))
-    )
+    semiaxes = np.sqrt((5 / mass) * (np.matmul(inverter, np.transpose(moments_val))))
+    c, b, a = np.sort(semiaxes)
 
-    # UNITS IN ANGSTROMS
-    return np.flip(semiaxis)
-
-
-def get_cpe(a, b, c):
-    """
-    Compute coordinate pair eccentricities for a given set of semi-axes.
-    Returns 2 values, eab and eac, both on [0,1]
-
-    a > b > c
-    If you get errors, then your semi-axis order has been
-    flipped somewhere.
-    """
     eab = np.sqrt(1 - (b**2 / a**2))
     eac = np.sqrt(1 - (c**2 / a**2))
+
     return eab, eac
 
 
@@ -402,14 +389,13 @@ class MicelleAdjacency(AnalysisBase):
             if self.do_calculate(
                 AggregateProperties.EAB | AggregateProperties.EAC, current_agg_entry
             ):
-                semiaxis = calc_semiaxis(agg_residues)
-                cpe = get_cpe(*semiaxis)
+                eab, eac = get_cpe(agg_residues.atoms)
                 if current_idx is None:
-                    self.eabs.append(cpe[0])
-                    self.eacs.append(cpe[1])
+                    self.eabs.append(eab)
+                    self.eacs.append(eac)
                 else:
-                    self.df.loc[current_idx, AggregateProperties.EAB.value] = cpe[0]
-                    self.df.loc[current_idx, AggregateProperties.EAC.value] = cpe[1]
+                    self.df.loc[current_idx, AggregateProperties.EAB.value] = eab
+                    self.df.loc[current_idx, AggregateProperties.EAC.value] = eac
 
             if self.do_calculate(
                 AggregateProperties.RADIUS_OF_GYRATION, current_agg_entry
@@ -820,7 +806,7 @@ def compare_dist(
     results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
     y_axis: str,
-    use_interval: bool = True,
+    use_interval: bool = False,
     interval: float = 20.0,
     min_cluster_size: int = 5,
     ylim: Optional["tuple[float, float]"] = None,
