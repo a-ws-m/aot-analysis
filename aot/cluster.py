@@ -204,11 +204,14 @@ def get_adj_array(
 
 class AggregateProperties(Enum):
     AGGREGATION_NUMBERS = "Aggregation numbers"
-    EAB = "Eab"
-    EAC = "Eac"
-    RADIUS_OF_GYRATION = "Radius of gyration"
-    VOLUME = "Volume"
-    SURFACE_AREA = "Surface area"
+    EAB = r"$e_{ab}$"
+    EAC = r"$e_{ac}$"
+    RADIUS_OF_GYRATION = r"Radius of gyration ($\AA$)"
+    VOLUME = r"Volume ($\AA^3$)"
+    SURFACE_AREA = r"Surface area ($\AA^2$)"
+    SURFACE_AREA_PER_SURFACTANT = r"Surfactant surface area ($\AA^2$)"
+    SURFACE_AREA_TO_VOLUME = r"Surface area / Volume ($\AA^{-1}$)"
+    NORMALISED_AGGREGATION_NUMBERS = "Normalised aggregation numbers"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
@@ -220,6 +223,8 @@ class AggregateProperties(Enum):
             {
                 cls.VOLUME,
                 cls.SURFACE_AREA,
+                cls.SURFACE_AREA_PER_SURFACTANT,
+                cls.SURFACE_AREA_TO_VOLUME,
             }
         )
 
@@ -432,7 +437,10 @@ class MicelleAdjacency(AnalysisBase):
             "Frame": self.frame_counter,
             "Time (ps)": self.time_counter,
             AggregateProperties.AGGREGATION_NUMBERS.value: self.agg_nums,
-            "Normalised aggregation numbers": np.array(self.agg_nums) / self.num_surf,
+            AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value: np.array(
+                self.agg_nums
+            )
+            / self.num_surf,
             AggregateProperties.EAB.value: self.eabs,
             AggregateProperties.EAC.value: self.eacs,
             AggregateProperties.RADIUS_OF_GYRATION.value: self.radii_of_gyration,
@@ -754,16 +762,14 @@ def load_results_datasets(
     plot_df["Norm. agg. number"] = plot_df["Normalised aggregation numbers"]
 
     try:
-        plot_df[EAB] = plot_df["Eab"]
-        plot_df[EAC] = plot_df["Eac"]
-    except KeyError:
-        pass
-
-    try:
-        plot_df["Surfactant surface area"] = (
-            plot_df["Surface area"] / plot_df["Aggregation numbers"]
+        plot_df[AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value] = (
+            plot_df[AggregateProperties.SURFACE_AREA.value]
+            / plot_df[AggregateProperties.AGGREGATION_NUMBERS.value]
         )
-        plot_df["Surface area / Volume"] = plot_df["Surface area"] / plot_df["Volume"]
+        plot_df[AggregateProperties.SURFACE_AREA_TO_VOLUME.value] = (
+            plot_df[AggregateProperties.SURFACE_AREA.value]
+            / plot_df[AggregateProperties.VOLUME.value]
+        )
     except KeyError:
         pass
 
@@ -941,8 +947,34 @@ def plot_concentrations(
     min_cluster_size: int = 5,
     file_template: str = "{conc}-overview.pdf",
 ):
-    """Make on plot per concentration showing the evolution of the properties."""
-    ...
+    """Make one plot per concentration showing the evolution of the properties."""
+    for conc in set(result.percent_aot for result in results):
+        conc_results = [result for result in results if result.percent_aot == conc]
+        plot_df = load_results_datasets(tuple(conc_results), min_cluster_size)
+        plot_df[TIME_COL] = plot_df[TIME_COL].round(-2)
+
+        plot_df = plot_df.melt(
+            [TIME_COL, "Type"],
+            value_vars=[prop.value for prop in properties],
+            var_name="Property",
+            value_name="Value",
+        )
+        g = sns.relplot(
+            plot_df,
+            x=TIME_COL,
+            y="Value",
+            col="Type",
+            row="Property",
+            kind="line",
+            errorbar="pi",
+            facet_kws={"sharey": "row", "margin_titles": True},
+        )
+        g.set_titles(col_template="{col_name}", row_template="")
+        for ax, prop in zip(g.axes[:, 0], properties):
+            ax.set_ylabel(prop.value)
+
+        g.tight_layout()
+        g.savefig(file_template.format(conc=conc), transparent=False)
 
 
 def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0):
@@ -1061,6 +1093,11 @@ def main():
         action="store_true",
         help="Compare the surface area to volume ratio in several simulations.",
     )
+    plot_options.add_argument(
+        "--one-per-conc",
+        action="store_true",
+        help="Make one plot per concentration showing the evolution of the properties.",
+    )
     args = parser.parse_args()
 
     WORKING_DIR = Path(args.dir)
@@ -1116,33 +1153,39 @@ def main():
 
     if args.vol:
         compare_dist(
-            results,
-            WORKING_DIR / "vol-comp.pdf",
-            "Volume",
-            rename="Volume ($\\AA^3$)",
+            results, WORKING_DIR / "vol-comp.pdf", AggregateProperties.VOLUME.value
         )
 
     if args.surf:
         compare_dist(
             results,
             WORKING_DIR / "surf-comp.pdf",
-            "Surface area",
-            rename="Surface area ($\\AA^2$)",
+            AggregateProperties.SURFACE_AREA.value,
         )
         compare_dist(
             results,
             WORKING_DIR / "norm-surf-comp.pdf",
-            "Surfactant surface area",
-            rename="Surface area per surfactant ($\\AA^2$)",
+            AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value,
         )
 
     if args.sa_ratio:
         compare_dist(
             results,
             WORKING_DIR / "sa-ratio-comp.pdf",
-            "Surface area / Volume",
-            rename="Surface area / Volume ($\\AA^{-1}$)",
+            AggregateProperties.SURFACE_AREA_TO_VOLUME.value,
             ylim=(0, 1),
+        )
+
+    if args.one_per_conc:
+        plot_concentrations(
+            results,
+            properties={
+                AggregateProperties.AGGREGATION_NUMBERS,
+                AggregateProperties.SURFACE_AREA_PER_SURFACTANT,
+                AggregateProperties.VOLUME,
+                AggregateProperties.SURFACE_AREA_TO_VOLUME,
+                AggregateProperties.RADIUS_OF_GYRATION,
+            },
         )
 
 
