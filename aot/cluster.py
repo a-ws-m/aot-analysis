@@ -105,12 +105,6 @@ def load_sparse(file) -> dict[int, coo_array]:
     return sparse_arrs
 
 
-def hydrodynamic_radius(group: AtomGroup) -> float:
-    """Calculate the hydrodynamic radius for a given group of atoms."""
-    center_on_cluster(group)
-    return 1 / ((1 / len(group) ** 2) * np.sum(1 / pdist(group.positions)))
-
-
 def radius_of_gyration(group: AtomGroup) -> float:
     """Calculate the radius of gyration for a given group of atoms."""
     center_on_cluster(group)
@@ -215,7 +209,6 @@ class AggregateProperties(Enum):
     RADIUS_OF_GYRATION = "Radius of gyration"
     VOLUME = "Volume"
     SURFACE_AREA = "Surface area"
-    HYDRODYNAMIC_RADIUS = "Hydrodynamic radius"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
@@ -349,7 +342,6 @@ class MicelleAdjacency(AnalysisBase):
         self.eacs: list[float] = []
 
         self.radii_of_gyration: list[float] = []
-        self.hydrodynamic_radius: list[float] = []
 
     def _single_frame(self):
         """Calculate the contact matrix for the current frame."""
@@ -424,18 +416,6 @@ class MicelleAdjacency(AnalysisBase):
                         current_idx, AggregateProperties.RADIUS_OF_GYRATION.value
                     ] = radius_of_gyration(agg_residues.atoms)
 
-            if self.do_calculate(
-                AggregateProperties.HYDRODYNAMIC_RADIUS, current_agg_entry
-            ):
-                if current_idx is None:
-                    self.hydrodynamic_radius.append(
-                        hydrodynamic_radius(agg_residues.atoms)
-                    )
-                else:
-                    self.df.loc[
-                        current_idx, AggregateProperties.HYDRODYNAMIC_RADIUS.value
-                    ] = hydrodynamic_radius(agg_residues.atoms)
-
             if current_idx is None:
                 self.agg_nums.append(agg_num)
 
@@ -458,7 +438,6 @@ class MicelleAdjacency(AnalysisBase):
             AggregateProperties.RADIUS_OF_GYRATION.value: self.radii_of_gyration,
             AggregateProperties.VOLUME.value: self.volume,
             AggregateProperties.SURFACE_AREA.value: self.surface,
-            AggregateProperties.HYDRODYNAMIC_RADIUS.value: self.hydrodynamic_radius,
         }
         data = {key: val for key, val in data.items() if len(val)}
 
@@ -956,6 +935,16 @@ def compare_clustering(
     g.savefig(graph_file)
 
 
+def plot_concentrations(
+    results: "list[AtomisticResults | CoarseResults]",
+    properties: set[AggregateProperties],
+    min_cluster_size: int = 5,
+    file_template: str = "{conc}-overview.pdf",
+):
+    """Make on plot per concentration showing the evolution of the properties."""
+    ...
+
+
 def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0):
     """Plot the radial distribution between tail group beads."""
     plot_df = pd.DataFrame()
@@ -1072,11 +1061,6 @@ def main():
         action="store_true",
         help="Compare the surface area to volume ratio in several simulations.",
     )
-    plot_options.add_argument(
-        "--hydrodynamic_radius",
-        action="store_true",
-        help="Compare the hydrodynamic radii in several simulations.",
-    )
     args = parser.parse_args()
 
     WORKING_DIR = Path(args.dir)
@@ -1159,14 +1143,6 @@ def main():
             "Surface area / Volume",
             rename="Surface area / Volume ($\\AA^{-1}$)",
             ylim=(0, 1),
-        )
-
-    if args.hydrodynamic_radius:
-        compare_dist(
-            results,
-            WORKING_DIR / "hydrodynamic-radius-comp.pdf",
-            "Hydrodynamic radius",
-            rename="Hydrodynamic radius ($\\AA$)",
         )
 
 
