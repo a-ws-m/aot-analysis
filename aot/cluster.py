@@ -609,6 +609,7 @@ def all_atomistic_ma(
     properties: "set[AggregateProperties]" = AggregateProperties.fast(),
     current_df: Optional[pd.DataFrame] = None,
     current_adj_mats: Optional[dict[int, coo_array]] = None,
+    end: Optional[int] = None,
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = result.universe()
@@ -626,7 +627,7 @@ def all_atomistic_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step)
+    ma.run(step=step, stop=end)
 
     return ma
 
@@ -638,6 +639,7 @@ def coarse_ma(
     properties: "set[AggregateProperties]" = AggregateProperties.fast(),
     current_df: Optional[pd.DataFrame] = None,
     current_adj_mats: Optional[dict[int, coo_array]] = None,
+    end: Optional[int] = None,
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = result.universe()
@@ -653,7 +655,7 @@ def coarse_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step)
+    ma.run(step=step, stop=end)
 
     return ma
 
@@ -666,6 +668,7 @@ def batch_ma_analysis(
     dir_: Path = Path("."),
     overwrite: bool = False,
     properties: "set[AggregateProperties]" = AggregateProperties.fast(),
+    end: Optional[int] = None,
 ) -> pd.DataFrame:
     """Load MA results from disk or run analyses anew."""
     plot_df = pd.DataFrame()
@@ -694,6 +697,7 @@ def batch_ma_analysis(
                 properties=properties,
                 current_df=this_df,
                 current_adj_mats=current_adj_mats,
+                end=end,
             )
         else:
             ma = all_atomistic_ma(
@@ -703,6 +707,7 @@ def batch_ma_analysis(
                 properties=properties,
                 current_df=this_df,
                 current_adj_mats=current_adj_mats,
+                end=end,
             )
         ma.save(adj_path, df_path)
 
@@ -732,6 +737,7 @@ def load_results_datasets(
     results: tuple[AtomisticResults | CoarseResults, ...],
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
+    end: Optional[int] = None,
 ) -> pd.DataFrame:
     """Load results datasets for plotting."""
     plot_df = pd.DataFrame()
@@ -744,6 +750,7 @@ def load_results_datasets(
             print(f"Found existing files for {result.plot_name}.")
             this_df = pd.read_csv(df_path, index_col=0)
 
+        this_df = this_df[this_df["Frame"] <= end] if end is not None else this_df
         this_df = this_df[this_df["Aggregation numbers"] >= min_cluster_size]
         this_df = this_df.groupby("Time (ps)").mean()
         this_df["Time (ps)"] = this_df.index
@@ -781,9 +788,10 @@ def compare_val(
     graph_file: Path,
     y_axis: str,
     min_cluster_size: int = 5,
+    end: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = load_results_datasets(tuple(results), min_cluster_size)
+    plot_df = load_results_datasets(tuple(results), min_cluster_size, end=end)
 
     print("Done analysing results!")
     print("Plotting graphs.")
@@ -817,9 +825,10 @@ def compare_dist(
     hue="Norm. agg. number",
     rename: Optional[str] = None,
     marker: str = "P",
+    end: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = load_results_datasets(tuple(results), min_cluster_size)
+    plot_df = load_results_datasets(tuple(results), min_cluster_size, end=end)
 
     if use_interval:
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
@@ -870,9 +879,10 @@ def compare_cpe(
     use_interval: bool = False,
     interval: int = 50,
     min_cluster_size: int = 5,
+    end: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = load_results_datasets(tuple(results), min_cluster_size)
+    plot_df = load_results_datasets(tuple(results), min_cluster_size, end=end)
 
     if use_interval:
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
@@ -905,10 +915,11 @@ def compare_clustering(
     graph_file: Path,
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
+    end: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
 
-    plot_df = load_results_datasets(tuple(results), min_cluster_size, dir_)
+    plot_df = load_results_datasets(tuple(results), min_cluster_size, dir_, end=end)
 
     y_vars = plot_df.columns
     plot_dfm = plot_df.melt(
@@ -946,11 +957,12 @@ def plot_concentrations(
     properties: set[AggregateProperties],
     min_cluster_size: int = 5,
     file_template: str = "{conc}-overview.pdf",
+    end=end,
 ):
     """Make one plot per concentration showing the evolution of the properties."""
     for conc in set(result.percent_aot for result in results):
         conc_results = [result for result in results if result.percent_aot == conc]
-        plot_df = load_results_datasets(tuple(conc_results), min_cluster_size)
+        plot_df = load_results_datasets(tuple(conc_results), min_cluster_size, end=end)
         plot_df[TIME_COL] = plot_df[TIME_COL].round(-2)
 
         plot_df = plot_df.melt(
@@ -1056,6 +1068,13 @@ def main():
         help="Start the analysis from this frame.",
     )
     parser.add_argument(
+        "-e",
+        "--end",
+        type=int,
+        default=-1,
+        help="End the analysis at this frame.",
+    )
+    parser.add_argument(
         "-o",
         "--overwrite",
         action="store_true",
@@ -1109,6 +1128,7 @@ def main():
     )
     args = parser.parse_args()
 
+    end = args.end if args.end > 0 else None
     WORKING_DIR = Path(args.dir)
     if not WORKING_DIR.exists():
         raise FileNotFoundError(f"Directory {WORKING_DIR} not found.")
@@ -1136,10 +1156,11 @@ def main():
         step=args.step_size,
         overwrite=args.overwrite,
         properties=properties,
+        end=end,
     )
 
     if args.clustering:
-        compare_clustering(results, WORKING_DIR / "clustering-comp.pdf")
+        compare_clustering(results, WORKING_DIR / "clustering-comp.pdf", end=end)
 
     if args.agg_num:
         compare_dist(
@@ -1148,21 +1169,23 @@ def main():
             "Normalised aggregation numbers",
             ylim=(0, 1.01),
             hue=None,
+            end=end,
         )
 
     if args.cpe:
-        compare_cpe(results, WORKING_DIR / "cpe-comp.pdf")
+        compare_cpe(results, WORKING_DIR / "cpe-comp.pdf", end=end)
 
     if args.rog:
         compare_val(
-            results,
-            WORKING_DIR / "rog-comp.pdf",
-            "Radius of gyration",
+            results, WORKING_DIR / "rog-comp.pdf", "Radius of gyration", end=end
         )
 
     if args.vol:
         compare_dist(
-            results, WORKING_DIR / "vol-comp.pdf", AggregateProperties.VOLUME.value
+            results,
+            WORKING_DIR / "vol-comp.pdf",
+            AggregateProperties.VOLUME.value,
+            end=end,
         )
 
     if args.surf:
@@ -1170,11 +1193,13 @@ def main():
             results,
             WORKING_DIR / "surf-comp.pdf",
             AggregateProperties.SURFACE_AREA.value,
+            end=end,
         )
         compare_dist(
             results,
             WORKING_DIR / "norm-surf-comp.pdf",
             AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value,
+            end=end,
         )
 
     if args.sa_ratio:
@@ -1183,6 +1208,7 @@ def main():
             WORKING_DIR / "sa-ratio-comp.pdf",
             AggregateProperties.SURFACE_AREA_TO_VOLUME.value,
             ylim=(0, 1),
+            end=end,
         )
 
     if args.one_per_conc:
@@ -1195,6 +1221,7 @@ def main():
                 AggregateProperties.SURFACE_AREA_TO_VOLUME,
                 AggregateProperties.RADIUS_OF_GYRATION,
             },
+            end=end,
         )
 
 
