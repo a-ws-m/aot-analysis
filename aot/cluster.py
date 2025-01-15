@@ -850,7 +850,7 @@ def compare_dist(
         native_scale=True,
         kind="strip",
         # inner=None,
-        sharey=True,
+        # sharey=True,
         margin_titles=True,
         # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
@@ -1167,7 +1167,7 @@ def main():
             results,
             WORKING_DIR / "agg-num-comp.pdf",
             "Normalised aggregation numbers",
-            ylim=(0, 1.01),
+            # ylim=(0, 1.01),
             hue=None,
             end=end,
         )
