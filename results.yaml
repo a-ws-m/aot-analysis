@@ -1,0 +1,40 @@
+Counterions:
+    ca: Ca2+
+    na: Na+
+
+CoarseResults:
+    dir: .
+    results:
+        - friendly_name: "Coarsest"
+          tail_match: "name CB[LR]"
+          cutoff: 5.875
+          dirname: coarse-alpha-sa
+          results:
+              - percent: 0.27
+                tpr_file: 0_27-percent/aot-only.tpr
+                traj_file: 0_27-percent/aot-full.xtc
+              - percent: 1
+                tpr_file: 0_98-percent/aot-only.tpr
+                traj_file: 0_98-percent/aot-only.xtc
+        - friendly_name: "Mixed"
+          tail_match: "name C[LR]B[RO]"
+          cutoff: 4.25
+          dirname: mixed-alpha-sa
+          results:
+              - percent: 0.27
+                tpr_file: 0_27-percent/aot-only.tpr
+                traj_file: 0_27-percent/aot-full.xtc
+              - percent: 1
+                tpr_file: 0_98-percent/aot-only.tpr
+                traj_file: 0_98-percent/aot-only.xtc
+        - friendly_name: "Finest"
+          tail_match: "name T[LR]B[RO]"
+          cutoff: 4.25
+          dirname: zeta-sa
+          results:
+              - percent: 0.27
+                tpr_file: 0_27-percent/aot-only.tpr
+                traj_file: 0_27-percent/aot-full.xtc
+              - percent: 1
+                tpr_file: 0_95-percent/aot-only.tpr
+                traj_file: 0_95-percent/aot-only.xtc
