@@ -107,12 +107,13 @@ def load_sparse(file) -> dict[int, coo_array]:
 
 def radius_of_gyration(group: AtomGroup) -> float:
     """Calculate the radius of gyration for a given group of atoms."""
-    center_on_cluster(group)
     return group.radius_of_gyration()
 
 
 def willard_chandler(
-    group: AtomGroup, radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP)
+    group: AtomGroup,
+    radii_dict: dict = pytim_data.vdwradii(CHARMM27_TOP),
+    write: Optional[str] = None,
 ) -> "tuple[float, float]":
     """Calculate the Willard-Chandler surface for a given group of atoms and associated properties."""
     u = group.universe
@@ -126,9 +127,11 @@ def willard_chandler(
         radii_dict=radii_dict,
         autoassign=False,
         density_cutoff_ratio=0.33,
-        centered=True,
+        # centered=True,
     )
 
+    if write is not None:
+        wc.writecube(write, group=group)
     # radius, _, _, _ = pytim.utilities.fit_sphere(wc.triangulated_surface[0])
 
     # converting PyTim to PyVista surface
@@ -150,8 +153,6 @@ def get_cpe(atoms: AtomGroup):
     Compute coordinate pair eccentricities for a given set of semi-axes.
     Returns 2 values, eab and eac, both on [0,1]
     """
-    center_on_cluster(atoms)
-
     # moments_val for the MoI themselves, princ_vec for the vector directions
     moments_val, princ_vec = np.linalg.eig(atoms.moment_of_inertia())
 
@@ -376,6 +377,8 @@ class MicelleAdjacency(AnalysisBase):
             if agg_num < self.min_cluster_size:
                 continue
 
+            center_on_cluster(agg_residues.atoms)
+
             try:
                 current_agg_entry = current_frame_entries.iloc[agg_idx]
                 current_idx = int(current_frame_entries.index.values[0]) + agg_idx
@@ -388,7 +391,10 @@ class MicelleAdjacency(AnalysisBase):
                 AggregateProperties.VOLUME | AggregateProperties.SURFACE_AREA,
                 current_agg_entry,
             ):
-                vol, surf = willard_chandler(agg_residues.atoms, self.vdwradii)
+                vol, surf = willard_chandler(
+                    agg_residues.atoms,
+                    self.vdwradii,
+                )
                 if current_idx is None:
                     self.volume.append(vol)
                     self.surface.append(surf)
@@ -716,7 +722,9 @@ def batch_ma_analysis(
         if only_last:
             this_df = this_df.loc[this_df["Frame"] == this_df["Frame"].max()]
 
-        this_df = this_df.loc[this_df["Aggregation numbers"] >= min_cluster_size]
+        this_df = this_df.loc[
+            this_df[AggregateProperties.AGGREGATION_NUMBERS.value] >= min_cluster_size
+        ]
 
         this_df["% AOT"] = f"{result.percent_aot:.1f}"
 
@@ -957,7 +965,7 @@ def plot_concentrations(
     properties: set[AggregateProperties],
     min_cluster_size: int = 5,
     file_template: str = "{conc}-overview.pdf",
-    end=end,
+    end: Optional[int] = None,
 ):
     """Make one plot per concentration showing the evolution of the properties."""
     for conc in set(result.percent_aot for result in results):
@@ -1177,7 +1185,10 @@ def main():
 
     if args.rog:
         compare_val(
-            results, WORKING_DIR / "rog-comp.pdf", "Radius of gyration", end=end
+            results,
+            WORKING_DIR / "rog-comp.pdf",
+            AggregateProperties.RADIUS_OF_GYRATION.value,
+            end=end,
         )
 
     if args.vol:
