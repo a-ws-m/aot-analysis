@@ -746,6 +746,7 @@ def load_results_datasets(
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
     end: Optional[int] = None,
+    end_time: Optional[int] = None,
 ) -> pd.DataFrame:
     """Load results datasets for plotting."""
     plot_df = pd.DataFrame()
@@ -772,6 +773,9 @@ def load_results_datasets(
 
         plot_df = pd.concat([plot_df, this_df], ignore_index=True)
 
+    if end_time is not None:
+        plot_df = plot_df[plot_df["Time (ps)"] <= end_time]
+
     plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
     plot_df["Log agg. num"] = plot_df["Aggregation numbers"].apply(np.log10)
     plot_df["Norm. agg. number"] = plot_df["Normalised aggregation numbers"]
@@ -797,9 +801,12 @@ def compare_val(
     y_axis: str,
     min_cluster_size: int = 5,
     end: Optional[int] = None,
+    end_time: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = load_results_datasets(tuple(results), min_cluster_size, end=end)
+    plot_df = load_results_datasets(
+        tuple(results), min_cluster_size, end=end, end_time=end_time
+    )
 
     print("Done analysing results!")
     print("Plotting graphs.")
@@ -834,9 +841,12 @@ def compare_dist(
     rename: Optional[str] = None,
     marker: str = "P",
     end: Optional[int] = None,
+    end_time: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = load_results_datasets(tuple(results), min_cluster_size, end=end)
+    plot_df = load_results_datasets(
+        tuple(results), min_cluster_size, end=end, end_time=end_time
+    )
 
     if use_interval:
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
@@ -858,7 +868,7 @@ def compare_dist(
         native_scale=True,
         kind="strip",
         # inner=None,
-        sharey=True,
+        sharey="row",
         margin_titles=True,
         # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
@@ -888,9 +898,12 @@ def compare_cpe(
     interval: int = 50,
     min_cluster_size: int = 5,
     end: Optional[int] = None,
+    end_time: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
-    plot_df = load_results_datasets(tuple(results), min_cluster_size, end=end)
+    plot_df = load_results_datasets(
+        tuple(results), min_cluster_size, end=end, end_time=end_time
+    )
 
     if use_interval:
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
@@ -924,10 +937,13 @@ def compare_clustering(
     min_cluster_size: int = 5,
     dir_: Path = Path("."),
     end: Optional[int] = None,
+    end_time: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
 
-    plot_df = load_results_datasets(tuple(results), min_cluster_size, dir_, end=end)
+    plot_df = load_results_datasets(
+        tuple(results), min_cluster_size, dir_, end=end, end_time=end_time
+    )
 
     y_vars = plot_df.columns
     plot_dfm = plot_df.melt(
@@ -966,11 +982,14 @@ def plot_concentrations(
     min_cluster_size: int = 5,
     file_template: str = "{conc}-overview.pdf",
     end: Optional[int] = None,
+    end_time: Optional[int] = None,
 ):
     """Make one plot per concentration showing the evolution of the properties."""
     for conc in set(result.percent_aot for result in results):
         conc_results = [result for result in results if result.percent_aot == conc]
-        plot_df = load_results_datasets(tuple(conc_results), min_cluster_size, end=end)
+        plot_df = load_results_datasets(
+            tuple(conc_results), min_cluster_size, end=end, end_time=end_time
+        )
         plot_df[TIME_COL] = plot_df[TIME_COL].round(-2)
 
         plot_df = plot_df.melt(
@@ -1083,6 +1102,12 @@ def main():
         help="End the analysis at this frame.",
     )
     parser.add_argument(
+        "--end-time",
+        type=int,
+        default=-1,
+        help="Plot until this timestep (ps). Negative values mean no limit.",
+    )
+    parser.add_argument(
         "-o",
         "--overwrite",
         action="store_true",
@@ -1137,6 +1162,10 @@ def main():
     args = parser.parse_args()
 
     end = args.end if args.end > 0 else None
+    end_time = args.end_time if args.end_time > 0 else None
+    if end is not None and end_time is not None:
+        raise RuntimeError("Cannot specify both --end and --end-time.")
+
     WORKING_DIR = Path(args.dir)
     if not WORKING_DIR.exists():
         raise FileNotFoundError(f"Directory {WORKING_DIR} not found.")
@@ -1168,20 +1197,26 @@ def main():
     )
 
     if args.clustering:
-        compare_clustering(results, WORKING_DIR / "clustering-comp.pdf", end=end)
+        compare_clustering(
+            results,
+            WORKING_DIR / "clustering-comp.pdf",
+            end=end,
+            end_time=end_time,
+        )
 
     if args.agg_num:
         compare_dist(
             results,
             WORKING_DIR / "agg-num-comp.pdf",
             "Normalised aggregation numbers",
-            ylim=(0, 1.01),
+            # ylim=(0, 1.01),
             hue=None,
             end=end,
+            end_time=end_time,
         )
 
     if args.cpe:
-        compare_cpe(results, WORKING_DIR / "cpe-comp.pdf", end=end)
+        compare_cpe(results, WORKING_DIR / "cpe-comp.pdf", end=end, end_time=end_time)
 
     if args.rog:
         compare_val(
@@ -1189,6 +1224,7 @@ def main():
             WORKING_DIR / "rog-comp.pdf",
             AggregateProperties.RADIUS_OF_GYRATION.value,
             end=end,
+            end_time=end_time,
         )
 
     if args.vol:
@@ -1197,6 +1233,7 @@ def main():
             WORKING_DIR / "vol-comp.pdf",
             AggregateProperties.VOLUME.value,
             end=end,
+            end_time=end_time,
         )
 
     if args.surf:
@@ -1205,12 +1242,14 @@ def main():
             WORKING_DIR / "surf-comp.pdf",
             AggregateProperties.SURFACE_AREA.value,
             end=end,
+            end_time=end_time,
         )
         compare_dist(
             results,
             WORKING_DIR / "norm-surf-comp.pdf",
             AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value,
             end=end,
+            end_time=end_time,
         )
 
     if args.sa_ratio:
@@ -1220,6 +1259,7 @@ def main():
             AggregateProperties.SURFACE_AREA_TO_VOLUME.value,
             ylim=(0, 1),
             end=end,
+            end_time=end_time,
         )
 
     if args.one_per_conc:
@@ -1233,6 +1273,7 @@ def main():
                 AggregateProperties.RADIUS_OF_GYRATION,
             },
             end=end,
+            end_time=end_time,
         )
 
 
