@@ -28,6 +28,7 @@ import pytim
 import pyvista as pv
 import seaborn as sns
 import yaml
+from kdecv.calculate import GaussianKDE
 from MDAnalysis.analysis.base import AnalysisBase, AtomGroup
 from MDAnalysis.analysis.distances import capped_distance
 from MDAnalysis.analysis.rdf import InterRDF
@@ -213,6 +214,7 @@ class AggregateProperties(Enum):
     SURFACE_AREA_PER_SURFACTANT = r"Surfactant surface area ($\AA^2$)"
     SURFACE_AREA_TO_VOLUME = r"Surface area / Volume ($\AA^{-1}$)"
     NORMALISED_AGGREGATION_NUMBERS = "Normalised aggregation numbers"
+    TOTAL_VOLUME = r"Total excluded volume estimate ($\AA^3$)"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
@@ -226,6 +228,7 @@ class AggregateProperties(Enum):
                 cls.SURFACE_AREA,
                 cls.SURFACE_AREA_PER_SURFACTANT,
                 cls.SURFACE_AREA_TO_VOLUME,
+                cls.TOTAL_VOLUME,
             }
         )
 
@@ -339,9 +342,12 @@ class MicelleAdjacency(AnalysisBase):
         self.frame_counter: list[int] = []
         self.time_counter: list[int] = []
         self.agg_nums: list[int] = []
+        self.norm_agg_nums: list[float] = []
 
         self.volume: list[float] = []
         self.surface: list[float] = []
+
+        self.total_volume: list[float] = []
 
         # Coordinate pair eccentricities
         self.eabs: list[float] = []
@@ -427,9 +433,57 @@ class MicelleAdjacency(AnalysisBase):
                         current_idx, AggregateProperties.RADIUS_OF_GYRATION.value
                     ] = radius_of_gyration(agg_residues.atoms)
 
-            if current_idx is None:
-                self.agg_nums.append(agg_num)
+            if self.do_calculate(AggregateProperties.TOTAL_VOLUME, current_agg_entry):
+                # Negatively weight the headgroups
+                weights = np.ones(len(agg_residues.atoms))
+                headgroup_idxs = np.where(
+                    [not atom in self.tailgroups for atom in agg_residues.atoms]
+                )
+                weights[headgroup_idxs] *= -1
 
+                gaus_kde = GaussianKDE(
+                    agg_residues.atoms.positions,
+                    self._ts.dimensions[:3],
+                    bw_method=2.0 / agg_residues.atoms.positions.std(ddof=1),
+                    weights=weights,
+                )
+                # dens = gaus_kde.grid_density(spacing=2.0)
+                # thresh = dens.max() / 3
+                # total_vol = (
+                #     (dens > thresh).sum() * np.prod(self._ts.dimensions[:3]) / dens.size
+                # )
+                total_vol = gaus_kde.volume_estimate(2.0, rel_threshold=1 / 3)
+
+                if current_idx is None:
+                    self.total_volume.append(total_vol)
+                else:
+                    self.df.loc[current_idx, AggregateProperties.TOTAL_VOLUME.value] = (
+                        total_vol
+                    )
+
+            if self.do_calculate(
+                AggregateProperties.AGGREGATION_NUMBERS, current_agg_entry
+            ):
+                if current_idx is None:
+                    self.agg_nums.append(agg_num)
+                else:
+                    self.df.loc[
+                        current_idx, AggregateProperties.AGGREGATION_NUMBERS.value
+                    ] = agg_num
+
+            if self.do_calculate(
+                AggregateProperties.NORMALISED_AGGREGATION_NUMBERS, current_agg_entry
+            ):
+                norm_agg_num = agg_num / self.num_surf
+                if current_idx is None:
+                    self.norm_agg_nums.append(norm_agg_num)
+                else:
+                    self.df.loc[
+                        current_idx,
+                        AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value,
+                    ] = norm_agg_num
+
+            if current_idx is None:
                 self.frame_counter.append(self._ts.frame)
                 self.time_counter.append(self._ts.time)
 
@@ -443,15 +497,13 @@ class MicelleAdjacency(AnalysisBase):
             "Frame": self.frame_counter,
             "Time (ps)": self.time_counter,
             AggregateProperties.AGGREGATION_NUMBERS.value: self.agg_nums,
-            AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value: np.array(
-                self.agg_nums
-            )
-            / self.num_surf,
+            AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value: self.norm_agg_nums,
             AggregateProperties.EAB.value: self.eabs,
             AggregateProperties.EAC.value: self.eacs,
             AggregateProperties.RADIUS_OF_GYRATION.value: self.radii_of_gyration,
             AggregateProperties.VOLUME.value: self.volume,
             AggregateProperties.SURFACE_AREA.value: self.surface,
+            AggregateProperties.TOTAL_VOLUME.value: self.total_volume,
         }
         data = {key: val for key, val in data.items() if len(val)}
 
@@ -685,13 +737,18 @@ def batch_ma_analysis(
         this_df = None
         current_adj_mats = None
 
-        if not overwrite:
-            if df_path.exists():
-                print(f"Found existing DataFrame for {result.plot_name}.")
-                this_df = pd.read_csv(df_path, index_col=0)
-            if adj_path.exists():
-                print(f"Found existing adjacency matrix for {result.plot_name}.")
-                current_adj_mats = load_sparse(adj_path)
+        if df_path.exists():
+            print(f"Found existing DataFrame for {result.plot_name}.")
+            this_df = pd.read_csv(df_path, index_col=0)
+        if adj_path.exists():
+            print(f"Found existing adjacency matrix for {result.plot_name}.")
+            current_adj_mats = load_sparse(adj_path)
+        if overwrite:
+            this_df.drop(
+                columns=[prop.value for prop in properties],
+                errors="ignore",
+                inplace=True,
+            )
 
         print(f"Analysing {result.plot_name} results.")
 
@@ -760,7 +817,9 @@ def load_results_datasets(
             this_df = pd.read_csv(df_path, index_col=0)
 
         this_df = this_df[this_df["Frame"] <= end] if end is not None else this_df
-        this_df = this_df[this_df["Aggregation numbers"] >= min_cluster_size]
+        this_df = this_df[
+            this_df[AggregateProperties.AGGREGATION_NUMBERS.value] >= min_cluster_size
+        ]
         this_df = this_df.groupby("Time (ps)").mean()
         this_df["Time (ps)"] = this_df.index
         this_df["% AOT"] = result.percent_aot
@@ -777,8 +836,12 @@ def load_results_datasets(
         plot_df = plot_df[plot_df["Time (ps)"] <= end_time]
 
     plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
-    plot_df["Log agg. num"] = plot_df["Aggregation numbers"].apply(np.log10)
-    plot_df["Norm. agg. number"] = plot_df["Normalised aggregation numbers"]
+    plot_df["Log agg. num"] = plot_df[
+        AggregateProperties.AGGREGATION_NUMBERS.value
+    ].apply(np.log10)
+    plot_df["Norm. agg. number"] = plot_df[
+        AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value
+    ]
 
     try:
         plot_df[AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value] = (
@@ -869,6 +932,7 @@ def compare_dist(
         kind="strip",
         # inner=None,
         sharey="row",
+        sharex=False,
         margin_titles=True,
         # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
@@ -1159,6 +1223,11 @@ def main():
         action="store_true",
         help="Make one plot per concentration showing the evolution of the properties.",
     )
+    plot_options.add_argument(
+        "--total-vol",
+        action="store_true",
+        help="Compute the volume estimation from the JAX-enabled Gaussian KDE.",
+    )
     args = parser.parse_args()
 
     end = args.end if args.end > 0 else None
@@ -1186,6 +1255,9 @@ def main():
     properties = AggregateProperties.fast()
     if args.vol or args.surf or args.sa_ratio:
         properties |= {AggregateProperties.VOLUME, AggregateProperties.SURFACE_AREA}
+
+    if args.total_vol:
+        properties |= {AggregateProperties.TOTAL_VOLUME}
 
     batch_ma_analysis(
         results,
@@ -1272,6 +1344,15 @@ def main():
                 AggregateProperties.SURFACE_AREA_TO_VOLUME,
                 AggregateProperties.RADIUS_OF_GYRATION,
             },
+            end=end,
+            end_time=end_time,
+        )
+
+    if args.total_vol:
+        compare_dist(
+            results,
+            WORKING_DIR / "total-vol-comp.pdf",
+            AggregateProperties.TOTAL_VOLUME.value,
             end=end,
             end_time=end_time,
         )
