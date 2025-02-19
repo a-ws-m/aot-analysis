@@ -28,7 +28,7 @@ import pytim
 import pyvista as pv
 import seaborn as sns
 import yaml
-from kdecv.calculate import GaussianKDE
+from kdecv.calculate import GaussianKDE, periodic_stddev
 from MDAnalysis.analysis.base import AnalysisBase, AtomGroup
 from MDAnalysis.analysis.distances import capped_distance
 from MDAnalysis.analysis.rdf import InterRDF
@@ -441,10 +441,13 @@ class MicelleAdjacency(AnalysisBase):
                 )
                 weights[headgroup_idxs] *= -1
 
+                box_dim = self._ts.dimensions[:3]
+
                 gaus_kde = GaussianKDE(
                     agg_residues.atoms.positions,
-                    self._ts.dimensions[:3],
-                    bw_method=2.0 / agg_residues.atoms.positions.std(ddof=1),
+                    box_dim,
+                    bw_method=2.0
+                    / periodic_stddev(self.whole_molecules.atoms.positions, box_dim),
                     weights=weights,
                 )
                 # dens = gaus_kde.grid_density(spacing=2.0)
@@ -452,7 +455,13 @@ class MicelleAdjacency(AnalysisBase):
                 # total_vol = (
                 #     (dens > thresh).sum() * np.prod(self._ts.dimensions[:3]) / dens.size
                 # )
-                total_vol = gaus_kde.volume_estimate(2.0, rel_threshold=1 / 3)
+                total_vol = gaus_kde.volume_estimate(
+                    2.0,
+                    # abs_threshold=6e-6,
+                    rel_threshold=1 / 3,
+                    smooth_cutoff=True,
+                    smooth_cutoff_width=1e-10,
+                )
 
                 if current_idx is None:
                     self.total_volume.append(total_vol)
