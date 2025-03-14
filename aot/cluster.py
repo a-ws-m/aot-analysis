@@ -44,7 +44,7 @@ except ImportError:
 
 from scipy.sparse.csgraph import connected_components
 
-TIME_COL = "Time (ns)"
+TIME_COL = r"Time ($\mathrm{\mu s}$)"
 
 EAB = "$e_{ab}$"
 EAC = "$e_{ac}$"
@@ -208,13 +208,13 @@ class AggregateProperties(Enum):
     AGGREGATION_NUMBERS = "Aggregation numbers"
     EAB = r"$e_{ab}$"
     EAC = r"$e_{ac}$"
-    RADIUS_OF_GYRATION = r"Radius of gyration ($\AA$)"
-    VOLUME = r"Volume ($\AA^3$)"
-    SURFACE_AREA = r"Surface area ($\AA^2$)"
-    SURFACE_AREA_PER_SURFACTANT = r"Surfactant surface area ($\AA^2$)"
-    SURFACE_AREA_TO_VOLUME = r"Surface area / Volume ($\AA^{-1}$)"
+    RADIUS_OF_GYRATION = r"Radius of gyration ($\mathrm{\AA}$)"
+    VOLUME = r"Volume ($\mathrm{\AA}^3$)"
+    SURFACE_AREA = r"Surface area ($\mathrm{\AA}^2$)"
+    SURFACE_AREA_PER_SURFACTANT = r"Surfactant surface area ($\mathrm{\AA}^2$)"
+    SURFACE_AREA_TO_VOLUME = r"Surface area / Volume ($\mathrm{\AA}^{-1}$)"
     NORMALISED_AGGREGATION_NUMBERS = "Normalised aggregation numbers"
-    TOTAL_VOLUME = r"Total excluded volume estimate ($\AA^3$)"
+    TOTAL_VOLUME = r"Total excluded volume estimate ($\mathrm{\AA}^3$)"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
@@ -444,23 +444,17 @@ class MicelleAdjacency(AnalysisBase):
                 box_dim = self._ts.dimensions[:3]
 
                 gaus_kde = GaussianKDE(
-                    agg_residues.atoms.positions,
+                    agg_residues.center_of_geometry(compound="residues"),
                     box_dim,
-                    bw_method=2.0
+                    bw_method=3.0
                     / periodic_stddev(self.whole_molecules.atoms.positions, box_dim),
-                    weights=weights,
+                    # weights=weights,
                 )
-                # dens = gaus_kde.grid_density(spacing=2.0)
-                # thresh = dens.max() / 3
-                # total_vol = (
-                #     (dens > thresh).sum() * np.prod(self._ts.dimensions[:3]) / dens.size
-                # )
+
                 total_vol = gaus_kde.volume_estimate(
                     2.0,
-                    # abs_threshold=6e-6,
                     rel_threshold=1 / 3,
-                    smooth_cutoff=True,
-                    smooth_cutoff_width=1e-10,
+                    smooth_cutoff=1e-6,
                 )
 
                 if current_idx is None:
@@ -844,7 +838,7 @@ def load_results_datasets(
     if end_time is not None:
         plot_df = plot_df[plot_df["Time (ps)"] <= end_time]
 
-    plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-3
+    plot_df[TIME_COL] = plot_df["Time (ps)"] * 1e-6
     plot_df["Log agg. num"] = plot_df[
         AggregateProperties.AGGREGATION_NUMBERS.value
     ].apply(np.log10)
@@ -874,11 +868,15 @@ def compare_val(
     min_cluster_size: int = 5,
     end: Optional[int] = None,
     end_time: Optional[int] = None,
+    round_: Optional[int] = None,
 ):
     """Compare the clustering behaviour of several simulations."""
     plot_df = load_results_datasets(
         tuple(results), min_cluster_size, end=end, end_time=end_time
     )
+
+    if round_ is not None:
+        plot_df[TIME_COL] = plot_df[TIME_COL].round(round_)
 
     print("Done analysing results!")
     print("Plotting graphs.")
@@ -891,13 +889,13 @@ def compare_val(
         col="Type",
         hue="Type",
         kind="line",
-        errorbar="sd",
+        errorbar="ci",
         # margin_titles=True,
         # sharey="row",
         facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
     )
     g.tight_layout()
-    g.savefig(graph_file, transparent=True)
+    g.savefig(graph_file, transparent=False)
 
 
 def compare_dist(
@@ -1034,9 +1032,11 @@ def compare_clustering(
         hue="% AOT",
         row="variable",
         kind="line",
-        errorbar="sd",
+        errorbar="ci",
         # margin_titles=True,
         # sharey="row",
+        palette="colorblind",
+        hue_order=["Finest", "Mixed", "Coarsest"],
         facet_kws={"margin_titles": True, "despine": False, "sharey": "row"},
     )
 
@@ -1063,7 +1063,7 @@ def plot_concentrations(
         plot_df = load_results_datasets(
             tuple(conc_results), min_cluster_size, end=end, end_time=end_time
         )
-        plot_df[TIME_COL] = plot_df[TIME_COL].round(-2)
+        plot_df[TIME_COL] = plot_df[TIME_COL].round(1)
 
         plot_df = plot_df.melt(
             [TIME_COL, "Type"],
@@ -1081,7 +1081,7 @@ def plot_concentrations(
             errorbar="ci",
             hue="Type",
             hue_order=["Finest", "Mixed", "Coarsest"],
-            palette="deep",
+            palette="colorblind",
             kind="line",
             legend=False,
             facet_kws={"sharey": "row", "margin_titles": True},
@@ -1115,7 +1115,7 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
         rdf.run(verbose=True, step=step, start=start)
 
         df = pd.DataFrame(
-            {r"Distance ($\AA$)": rdf.results.bins, r"$g(r)$": rdf.results.rdf}
+            {r"Distance ($\mathrm{\AA}$)": rdf.results.bins, r"$g(r)$": rdf.results.rdf}
         )
         df["Mapping"] = result.coarseness.friendly_name
         df["% AOT"] = str(result.percent_aot)
@@ -1123,7 +1123,7 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
 
     g = sns.relplot(
         data=plot_df,
-        x=r"Distance ($\AA$)",
+        x=r"Distance ($\mathrm{\AA}$)",
         y=r"$g(r)$",
         col="Mapping",
         kind="line",
@@ -1137,7 +1137,7 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
 
 def main():
     """Commandline interface for program."""
-    sns.set_theme(context="talk", palette="flare")
+    sns.set_theme(context="paper", palette="colorblind")
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1294,6 +1294,14 @@ def main():
             hue=None,
             end=end,
             end_time=end_time,
+        )
+        compare_val(
+            results,
+            WORKING_DIR / "agg-num-comp-line.pdf",
+            AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value,
+            end=end,
+            end_time=end_time,
+            round_=1,
         )
 
     if args.cpe:

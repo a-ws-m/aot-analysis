@@ -3,7 +3,7 @@ from setuptools import find_packages, setup
 setup(
     name="aot",
     version="0.1",
-    packages=find_packages(include="aot"),
+    packages=find_packages(),
     license="MIT",
     author="Alex Moriarty",
     author_email="amoriarty14@gmail.com",
@@ -14,7 +14,6 @@ setup(
         "seaborn",
         "pandas",
         "scipy",
-        "networkx",
         "matplotlib",
         "rdkit",
         "numpy",
