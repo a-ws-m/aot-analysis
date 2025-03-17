@@ -28,14 +28,19 @@ import pytim
 import pyvista as pv
 import seaborn as sns
 import yaml
-from kdecv.calculate import GaussianKDE, periodic_stddev
+
+try:
+    from kdecv.calculate import GaussianKDE, periodic_stddev
+
+    HAS_KDECV: bool = True
+except ImportError:
+    HAS_KDECV = False
 from MDAnalysis.analysis.base import AnalysisBase, AtomGroup
 from MDAnalysis.analysis.distances import capped_distance
 from MDAnalysis.analysis.rdf import InterRDF
 from MDAnalysis.core.groups import ResidueGroup
 from pytim.datafiles import CHARMM27_TOP, pytim_data
 from pytim.interface import Interface
-from scipy.spatial.distance import pdist
 
 try:
     from scipy.sparse import coo_array
@@ -434,6 +439,11 @@ class MicelleAdjacency(AnalysisBase):
                     ] = radius_of_gyration(agg_residues.atoms)
 
             if self.do_calculate(AggregateProperties.TOTAL_VOLUME, current_agg_entry):
+                if not HAS_KDECV:
+                    raise ImportError(
+                        "Cannot load library `kdecv`, required for total volume calculation. Consider using `--vol` instead."
+                    )
+
                 # Negatively weight the headgroups
                 weights = np.ones(len(agg_residues.atoms))
                 headgroup_idxs = np.where(
