@@ -15,7 +15,6 @@ setup(
         "pandas",
         "scipy",
         "matplotlib",
-        "rdkit",
         "numpy",
         "pyyaml",
         "tqdm",
