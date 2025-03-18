@@ -787,7 +787,7 @@ def batch_ma_analysis(
             )
         ma.save(adj_path, df_path)
 
-        this_df = ma.df
+        this_df = ma.df.copy()
 
         if only_last:
             this_df = this_df.loc[this_df["Frame"] == this_df["Frame"].max()]
@@ -1066,6 +1066,7 @@ def plot_concentrations(
     file_template: str = "{conc}-overview.pdf",
     end: Optional[int] = None,
     end_time: Optional[int] = None,
+    round_: Optional[int] = 1,
 ):
     """Make one plot per concentration showing the evolution of the properties."""
     for conc in set(result.percent_aot for result in results):
@@ -1073,7 +1074,9 @@ def plot_concentrations(
         plot_df = load_results_datasets(
             tuple(conc_results), min_cluster_size, end=end, end_time=end_time
         )
-        plot_df[TIME_COL] = plot_df[TIME_COL].round(1)
+
+        if round_:
+            plot_df[TIME_COL] = plot_df[TIME_COL].round(round_)
 
         plot_df = plot_df.melt(
             [TIME_COL, "Type"],
@@ -1103,8 +1106,11 @@ def plot_concentrations(
         conc_str = (
             f"{conc:.0f}" if np.isclose(conc, np.round(conc, 0)) else f"{conc:.2f}"
         )
+
+        g.figure.subplots_adjust(top=0.99)
         g.figure.suptitle(f"{conc_str} wt.% AOT")
-        g.tight_layout()
+
+        # g.tight_layout()
         g.savefig(file_template.format(conc=conc), transparent=False)
 
 
