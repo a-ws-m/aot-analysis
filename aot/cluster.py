@@ -1088,29 +1088,29 @@ def plot_concentrations(
             plot_df,
             x=TIME_COL,
             y="Value",
-            col="Type",
-            row="Property",
+            col="Property",
+            col_wrap=3,
             # kind="scatter",
             errorbar="ci",
             hue="Type",
             hue_order=["Finest", "Mixed", "Coarsest"],
             palette="colorblind",
             kind="line",
-            legend=False,
-            facet_kws={"sharey": "row", "margin_titles": True},
+            # legend=False,
+            facet_kws={"sharey": False, "margin_titles": False, "despine": False},
         )
-        g.set_titles(col_template="{col_name}", row_template="")
-        for ax, prop in zip(g.axes[:, 0], properties):
+        g.set_titles("")
+        for ax, prop in zip(g.axes.flatten(), properties):
             ax.set_ylabel(prop.value)
 
         conc_str = (
             f"{conc:.0f}" if np.isclose(conc, np.round(conc, 0)) else f"{conc:.2f}"
         )
 
-        g.figure.subplots_adjust(top=0.99)
-        g.figure.suptitle(f"{conc_str} wt.% AOT")
+        # g.figure.subplots_adjust(top=0.99)
+        # g.figure.suptitle(f"{conc_str} wt.% AOT")
 
-        # g.tight_layout()
+        g.tight_layout()
         g.savefig(file_template.format(conc=conc), transparent=False)
 
 
