@@ -181,7 +181,7 @@ def compare_dist(
 
 def compare_soap_similarity(
     results: list[AtomisticResults | CoarseResults],
-    file_template: str = "{conc}-soap-similarity.pdf",
+    file_template: str = "{conc}-soap-similarity-{hue}.pdf",
     use_interval: bool = False,
     interval: int = 50,
     min_cluster_size: int = 5,
@@ -201,28 +201,30 @@ def compare_soap_similarity(
         print("Done analysing results!")
         print("Plotting graphs.")
 
-        with sns.axes_style("white"):
-            g = sns.relplot(
-                kind="scatter",
-                data=plot_df,
-                x=AggregateProperties.SOAP_SIM_1.value,
-                y=AggregateProperties.SOAP_SIM_2.value,
-                row="% AOT",
-                col="Type",
-                hue=TIME_COL,
-                facet_kws={
-                    "margin_titles": True,
-                    "despine": False,
-                    "sharex": False,
-                    "sharey": False,
-                },
-                palette="flare",
-            )
+        for hue, hue_name in [("Norm. agg. number", "agg-num"), (TIME_COL, "time")]:
 
-        g.set_titles(col_template="{col_name}")
+            with sns.axes_style("white"):
+                g = sns.relplot(
+                    kind="scatter",
+                    data=plot_df,
+                    x=AggregateProperties.SOAP_SIM_1.value,
+                    y=AggregateProperties.SOAP_SIM_2.value,
+                    row="% AOT",
+                    col="Type",
+                    hue=hue,
+                    facet_kws={
+                        "margin_titles": True,
+                        "despine": False,
+                        "sharex": False,
+                        "sharey": False,
+                    },
+                    palette="flare",
+                )
 
-        g.tight_layout()
-        g.savefig(file_template.format(conc=conc), transparent=False)
+            g.set_titles(col_template="{col_name}")
+
+            g.tight_layout()
+            g.savefig(file_template.format(conc=conc, hue=hue_name), transparent=False)
 
 
 def compare_cpe(

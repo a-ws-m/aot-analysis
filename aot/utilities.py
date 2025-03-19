@@ -62,8 +62,8 @@ class AggregateProperties(Enum):
     SURFACE_AREA_TO_VOLUME = r"Surface area / Volume ($\mathrm{\AA}^{-1}$)"
     NORMALISED_AGGREGATION_NUMBERS = "Normalised aggregation numbers"
     TOTAL_VOLUME = r"Total excluded volume estimate ($\mathrm{\AA}^3$)"
-    SOAP_SIM_1 = "Principal component 1 of SOAP kernel"
-    SOAP_SIM_2 = "Principal component 2 of SOAP kernel"
+    SOAP_SIM_1 = "Principal component 1 of SOAP KPCA"
+    SOAP_SIM_2 = "Principal component 2 of SOAP KPCA"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
