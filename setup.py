@@ -27,7 +27,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "aot_cluster=aot.cluster:main",
+            "aot_cluster=aot.plot:main",
             "aot_extract=scripts.extract_cluster:main",
         ],
     },
