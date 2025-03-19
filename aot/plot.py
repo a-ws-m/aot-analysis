@@ -209,10 +209,10 @@ def compare_soap_similarity(
                 y=AggregateProperties.SOAP_SIM_2.value,
                 row="% AOT",
                 col="Type",
-                hue="Norm. agg. number",
+                hue=TIME_COL,
                 facet_kws={
                     "margin_titles": True,
-                    "despine": True,
+                    "despine": False,
                     "sharex": False,
                     "sharey": False,
                 },
@@ -220,12 +220,6 @@ def compare_soap_similarity(
             )
 
         g.set_titles(col_template="{col_name}")
-
-        g.set_xticklabels([])
-        g.set_yticklabels([])
-
-        for ax in g.axes.flatten():
-            ax.set_aspect("equal")
 
         g.tight_layout()
         g.savefig(file_template.format(conc=conc), transparent=False)
@@ -476,6 +470,11 @@ def main():
         action="store_true",
         help="Plot the RDFs between tail group beads and exit.",
     )
+    parser.add_argument(
+        "--no-calc",
+        action="store_true",
+        help="Force the program to skip the calculation step.",
+    )
     plot_options = parser.add_argument_group("Plot types")
     plot_options.add_argument(
         "--clustering",
@@ -559,14 +558,15 @@ def main():
     if args.total_vol:
         properties |= {AggregateProperties.TOTAL_VOLUME}
 
-    batch_ma_analysis(
-        results,
-        min_cluster_size=5,
-        step=args.step_size,
-        overwrite=args.overwrite,
-        properties=properties,
-        end=end,
-    )
+    if not args.no_calc:
+        batch_ma_analysis(
+            results,
+            min_cluster_size=5,
+            step=args.step_size,
+            overwrite=args.overwrite,
+            properties=properties,
+            end=end,
+        )
 
     if args.clustering:
         compare_clustering(
