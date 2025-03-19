@@ -308,13 +308,16 @@ class MicelleAdjacency(AnalysisBase):
 
         self.soap: Optional[SOAP] = None
         if HAS_DSCRIBE:
+            r_cut = 3 * self.cutoff
+
             self.soap = SOAP(
                 species=self.atom_map.values(),
-                periodic=True,
-                r_cut=5.0,
+                r_cut=r_cut,
                 n_max=8,
                 l_max=8,
                 sparse=False,
+                periodic=True,
+                # weighting={"function": "poly", "r0": r_cut, "m": 1, "c": 1, "w0": 0},
                 average="inner",
             )
 
@@ -469,7 +472,7 @@ class MicelleAdjacency(AnalysisBase):
                 ase_atoms = atoms_to_ase(agg_residues.atoms, atom_map=self.atom_map)
 
                 # Get the average SOAP vector
-                self.soap_vectors.append(self.soap.create(ase_atoms))
+                self.soap_vectors.append(self.soap.create(ase_atoms, n_jobs=-1))
 
             if current_idx is None:
                 self.frame_counter.append(self._ts.frame)
