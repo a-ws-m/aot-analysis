@@ -919,7 +919,7 @@ def compare_dist(
     semilog: bool = False,
     hue="Norm. agg. number",
     rename: Optional[str] = None,
-    marker: str = "P",
+    marker: str = ".",
     end: Optional[int] = None,
     end_time: Optional[int] = None,
 ):
@@ -937,19 +937,21 @@ def compare_dist(
     print("Done analysing results!")
     print("Plotting graphs.")
 
+    plot_df["Model"] = plot_df["Type"]
+
     g = sns.catplot(
         data=plot_df,
         x=TIME_COL,
         # order=time_labels,
         y=y_axis if not rename else rename,
         row="% AOT",
-        col="Type",
+        col="Model",
         hue=hue,
         native_scale=True,
         kind="strip",
         # inner=None,
         sharey="row",
-        sharex=False,
+        sharex="row",
         margin_titles=True,
         # facet_kws={"margin_titles": True, "despine": False},
         palette="flare",
@@ -966,6 +968,8 @@ def compare_dist(
         g.set(yscale="log")
     if ylim is not None:
         g.set(ylim=ylim)
+
+    g.set_titles(col_template="{col_name}")
 
     # g.set_xticklabels(time_labels, rotation=45)
     g.tight_layout()
@@ -1084,6 +1088,9 @@ def plot_concentrations(
             var_name="Property",
             value_name="Value",
         )
+
+        plot_df["Model"] = plot_df["Type"]
+
         g = sns.relplot(
             plot_df,
             x=TIME_COL,
@@ -1092,12 +1099,16 @@ def plot_concentrations(
             col_wrap=3,
             # kind="scatter",
             errorbar="ci",
-            hue="Type",
+            hue="Model",
             hue_order=["Finest", "Mixed", "Coarsest"],
             palette="colorblind",
             kind="line",
             # legend=False,
-            facet_kws={"sharey": False, "margin_titles": False, "despine": False},
+            facet_kws={
+                "sharey": False,
+                "margin_titles": False,
+                "despine": False,
+            },
         )
         g.set_titles("")
         for ax, prop in zip(g.axes.flatten(), properties):
