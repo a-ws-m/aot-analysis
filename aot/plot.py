@@ -179,6 +179,55 @@ def compare_dist(
     g.savefig(graph_file, transparent=False)
 
 
+def compare_soap_similarity(
+    results: list[AtomisticResults | CoarseResults],
+    file_template: str = "{conc}-soap-similarity.pdf",
+    use_interval: bool = False,
+    interval: int = 50,
+    min_cluster_size: int = 5,
+    end: Optional[int] = None,
+    end_time: Optional[int] = None,
+):
+    """Plot the KPCA map of the SOAP vectors."""
+    for conc in set(result.percent_aot for result in results):
+        conc_results = [result for result in results if result.percent_aot == conc]
+        plot_df = load_results_datasets(
+            tuple(conc_results), min_cluster_size, end=end, end_time=end_time
+        )
+
+        if use_interval:
+            plot_df = plot_df[plot_df["Frame"] % interval == 0]
+
+        print("Done analysing results!")
+        print("Plotting graphs.")
+
+        with sns.axes_style("white"):
+            g = sns.relplot(
+                kind="scatter",
+                data=plot_df,
+                x=AggregateProperties.SOAP_SIM_1.value,
+                y=AggregateProperties.SOAP_SIM_2.value,
+                row="% AOT",
+                col="Type",
+                hue="Norm. agg. number",
+                facet_kws={
+                    "margin_titles": True,
+                    "despine": True,
+                    "sharex": False,
+                    "sharey": False,
+                },
+                palette="flare",
+            )
+
+        g.set_titles(col_template="{col_name}")
+
+        g.set_xticklabels([])
+        g.set_yticklabels([])
+
+        g.tight_layout()
+        g.savefig(file_template.format(conc=conc), transparent=False)
+
+
 def compare_cpe(
     results: list[AtomisticResults | CoarseResults],
     graph_file: Path,
@@ -214,6 +263,9 @@ def compare_cpe(
     for ax in g.axes.flatten():
         grid_col = plt.rcParams["grid.color"]
         ax.plot([0, 1], [0, 1], c=grid_col, lw=2, linestyle="--", zorder=-0.5)
+
+    g.set_titles(col_template="{col_name}")
+
     g.set(xlim=(0, 1), ylim=(0, 1), aspect="equal")
     g.tight_layout()
     g.savefig(graph_file, transparent=False)
@@ -467,6 +519,12 @@ def main():
         action="store_true",
         help="Compute the volume estimation from the JAX-enabled Gaussian KDE.",
     )
+    plot_options.add_argument(
+        "--soap-similarity",
+        action="store_true",
+        help="Compute the KPCA reduction of the SOAP vectors for each aggregate.",
+    )
+
     args = parser.parse_args()
 
     end = args.end if args.end > 0 else None
@@ -600,6 +658,14 @@ def main():
             results,
             WORKING_DIR / "total-vol-comp.pdf",
             AggregateProperties.TOTAL_VOLUME.value,
+            end=end,
+            end_time=end_time,
+        )
+
+    if args.soap_similarity:
+        compare_soap_similarity(
+            results,
+            WORKING_DIR / "soap-similarity.pdf",
             end=end,
             end_time=end_time,
         )

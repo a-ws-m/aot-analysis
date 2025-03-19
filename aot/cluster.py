@@ -16,6 +16,15 @@ except ImportError:
 from pathlib import Path
 from typing import Optional
 
+try:
+    import ase
+    from dscribe.descriptors import SOAP
+    from sklearn.decomposition import KernelPCA
+
+    HAS_DSCRIBE = True
+except ImportError:
+    HAS_DSCRIBE = False
+
 import MDAnalysis as mda
 import numpy as np
 import pandas as pd
@@ -159,6 +168,32 @@ def get_adj_array(
     )
 
 
+def atoms_to_ase(
+    atoms: mda.AtomGroup, atom_map: Optional[dict[str, int]] = None
+) -> "ase.Atoms":
+    """Convert MDAnalysis atoms to an ASE Atoms object."""
+    if not HAS_DSCRIBE:
+        raise ImportError(
+            "Cannot import `dscribe` or `ase`. Please check they are installed."
+        )
+
+    u = atoms.universe
+
+    symbols = [atom.type[0] for atom in atoms]
+    if atom_map is not None:
+        numbers = [atom_map[symbol] for symbol in symbols]
+    else:
+        numbers = ase.data.atomic_numbers[symbols]
+
+    return ase.Atoms(
+        numbers=numbers,
+        positions=atoms.positions,
+        masses=atoms.masses,
+        cell=u.dimensions[:3],
+        pbc=True,
+    )
+
+
 class MicelleAdjacency(AnalysisBase):
     """Class for computing the adjacency matrix of surfactants in micelles.
 
@@ -230,6 +265,12 @@ class MicelleAdjacency(AnalysisBase):
         else:
             return pytim_data.vdwradii(CHARMM27_TOP)
 
+    @cached_property
+    def atom_map(self) -> set[str]:
+        """Get a canonical map from atom types to integers."""
+        atom_types = set(atom.type[0] for atom in self.whole_molecules.atoms)
+        return {atom: idx + 1 for idx, atom in enumerate(sorted(atom_types))}
+
     def do_calculate(
         self,
         properties: AggregateProperties | set[AggregateProperties],
@@ -264,6 +305,20 @@ class MicelleAdjacency(AnalysisBase):
         self.eacs: list[float] = []
 
         self.radii_of_gyration: list[float] = []
+
+        self.soap: Optional[SOAP] = None
+        if HAS_DSCRIBE:
+            self.soap = SOAP(
+                species=self.atom_map.values(),
+                periodic=True,
+                r_cut=5.0,
+                n_max=8,
+                l_max=8,
+                sparse=False,
+                average="inner",
+            )
+
+        self.soap_vectors: list[np.ndarray] = []
 
     def _single_frame(self):
         """Calculate the contact matrix for the current frame."""
@@ -401,6 +456,21 @@ class MicelleAdjacency(AnalysisBase):
                         AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value,
                     ] = norm_agg_num
 
+            if self.properties.intersection(
+                AggregateProperties.SOAP_SIM_1 | AggregateProperties.SOAP_SIM_2
+            ):
+                # TODO: We don't save the full SOAP vector, so we need to recalculate this every time
+                if not HAS_DSCRIBE:
+                    raise ImportError(
+                        "Cannot import `dscribe`. Please check it is installed."
+                    )
+
+                # Convert the atoms to an ASE Atoms object
+                ase_atoms = atoms_to_ase(agg_residues.atoms, atom_map=self.atom_map)
+
+                # Get the average SOAP vector
+                self.soap_vectors.append(self.soap.create(ase_atoms))
+
             if current_idx is None:
                 self.frame_counter.append(self._ts.frame)
                 self.time_counter.append(self._ts.time)
@@ -410,7 +480,16 @@ class MicelleAdjacency(AnalysisBase):
             agg_idx += 1
 
     def _conclude(self):
-        """Store results in DataFrame."""
+        """Store results in DataFrame and calculate SOAP KPCA."""
+
+        if len(self.soap_vectors):
+            kpca = KernelPCA(n_components=2)
+            soap_sim = kpca.fit_transform(self.soap_vectors)
+            soap_sim_1, soap_sim_2 = soap_sim[:, 0], soap_sim[:, 1]
+
+            self.df[AggregateProperties.SOAP_SIM_1.value] = soap_sim_1
+            self.df[AggregateProperties.SOAP_SIM_2.value] = soap_sim_2
+
         data = {
             "Frame": self.frame_counter,
             "Time (ps)": self.time_counter,
