@@ -224,6 +224,9 @@ def compare_soap_similarity(
         g.set_xticklabels([])
         g.set_yticklabels([])
 
+        for ax in g.axes.flatten():
+            ax.set_aspect("equal")
+
         g.tight_layout()
         g.savefig(file_template.format(conc=conc), transparent=False)
 
@@ -665,7 +668,6 @@ def main():
     if args.soap_similarity:
         compare_soap_similarity(
             results,
-            WORKING_DIR / "soap-similarity.pdf",
             end=end,
             end_time=end_time,
         )

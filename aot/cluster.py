@@ -19,7 +19,7 @@ from typing import Optional
 try:
     import ase
     from dscribe.descriptors import SOAP
-    from sklearn.decomposition import KernelPCA
+    from sklearn.decomposition import PCA
 
     HAS_DSCRIBE = True
 except ImportError:
@@ -483,8 +483,8 @@ class MicelleAdjacency(AnalysisBase):
         """Store results in DataFrame and calculate SOAP KPCA."""
 
         if len(self.soap_vectors):
-            kpca = KernelPCA(n_components=2)
-            soap_sim = kpca.fit_transform(self.soap_vectors)
+            pca = PCA(n_components=2)
+            soap_sim = pca.fit_transform(self.soap_vectors)
             soap_sim_1, soap_sim_2 = soap_sim[:, 0], soap_sim[:, 1]
 
             self.df[AggregateProperties.SOAP_SIM_1.value] = soap_sim_1
