@@ -20,9 +20,13 @@ try:
     import ase
     from dscribe.descriptors import SOAP
     from sklearn.decomposition import KernelPCA
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
 
+    DSCRIBE_IMPORT_ERROR = None
     HAS_DSCRIBE = True
-except ImportError:
+except ImportError as e:
+    DSCRIBE_IMPORT_ERROR = e
     HAS_DSCRIBE = False
 
 import MDAnalysis as mda
@@ -51,6 +55,14 @@ except ImportError:
 from scipy.sparse.csgraph import connected_components
 
 from .utilities import *
+
+
+def check_dscribe():
+    """Check if `dscribe` is installed."""
+    if not HAS_DSCRIBE:
+        raise ImportError(
+            "Cannot load dependencies to calculate SOAP KPCA"
+        ) from DSCRIBE_IMPORT_ERROR
 
 
 def center_on_cluster(cluster: AtomGroup):
@@ -172,10 +184,7 @@ def atoms_to_ase(
     atoms: mda.AtomGroup, atom_map: Optional[dict[str, int]] = None
 ) -> "ase.Atoms":
     """Convert MDAnalysis atoms to an ASE Atoms object."""
-    if not HAS_DSCRIBE:
-        raise ImportError(
-            "Cannot import `dscribe` or `ase`. Please check they are installed."
-        )
+    check_dscribe()
 
     u = atoms.universe
 
@@ -459,20 +468,23 @@ class MicelleAdjacency(AnalysisBase):
                         AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value,
                     ] = norm_agg_num
 
-            if self.properties.intersection(
-                AggregateProperties.SOAP_SIM_1 | AggregateProperties.SOAP_SIM_2
+            if self.do_calculate(
+                AggregateProperties.SOAP_SIM_1 | AggregateProperties.SOAP_SIM_2,
+                current_agg_entry,
             ):
-                # TODO: We don't save the full SOAP vector, so we need to recalculate this every time
-                if not HAS_DSCRIBE:
-                    raise ImportError(
-                        "Cannot import `dscribe`. Please check it is installed."
-                    )
+                check_dscribe()
 
                 # Convert the atoms to an ASE Atoms object
                 ase_atoms = atoms_to_ase(agg_residues.atoms, atom_map=self.atom_map)
 
                 # Get the average SOAP vector
-                self.soap_vectors.append(self.soap.create(ase_atoms, n_jobs=-1))
+                soap_vector = self.soap.create(ase_atoms, n_jobs=-1)
+                if current_idx is None:
+                    self.soap_vectors.append(soap_vector)
+                else:
+                    self.df.loc[current_idx, AggregateProperties.SOAP_VECTOR.value] = (
+                        soap_vector.tostring()
+                    )
 
             if current_idx is None:
                 self.frame_counter.append(self._ts.frame)
@@ -485,14 +497,6 @@ class MicelleAdjacency(AnalysisBase):
     def _conclude(self):
         """Store results in DataFrame and calculate SOAP KPCA."""
 
-        if len(self.soap_vectors):
-            kpca = KernelPCA(n_components=2, kernel="poly", degree=2, coef0=0)
-            soap_sim = kpca.fit_transform(self.soap_vectors)
-            soap_sim_1, soap_sim_2 = soap_sim[:, 0], soap_sim[:, 1]
-
-            self.df[AggregateProperties.SOAP_SIM_1.value] = soap_sim_1
-            self.df[AggregateProperties.SOAP_SIM_2.value] = soap_sim_2
-
         data = {
             "Frame": self.frame_counter,
             "Time (ps)": self.time_counter,
@@ -504,11 +508,33 @@ class MicelleAdjacency(AnalysisBase):
             AggregateProperties.VOLUME.value: self.volume,
             AggregateProperties.SURFACE_AREA.value: self.surface,
             AggregateProperties.TOTAL_VOLUME.value: self.total_volume,
+            AggregateProperties.SOAP_VECTOR.value: self.soap_vectors,
         }
         data = {key: val for key, val in data.items() if len(val)}
 
         self.df = pd.concat([self.df, pd.DataFrame(data)], ignore_index=True)
         self.df.sort_values("Frame", inplace=True, ignore_index=True)
+
+        if AggregateProperties.SOAP_VECTOR.value in self.df.columns:
+            pipe = Pipeline(
+                [
+                    ("scaler", StandardScaler()),
+                    (
+                        "kpca",
+                        KernelPCA(n_components=2, kernel="poly", degree=2, coef0=0),
+                    ),
+                ]
+            )
+
+            soap_vectors = [
+                np.fromstring(x) for x in self.df[AggregateProperties.SOAP_VECTOR.value]
+            ]
+
+            soap_sim = pipe.fit_transform(soap_vectors)
+            soap_sim_1, soap_sim_2 = soap_sim[:, 0], soap_sim[:, 1]
+
+            self.df[AggregateProperties.SOAP_SIM_1.value] = soap_sim_1
+            self.df[AggregateProperties.SOAP_SIM_2.value] = soap_sim_2
 
     def save(self, adj_path: Path, df_path: Path):
         save_sparse(self.adj_mats, adj_path)
