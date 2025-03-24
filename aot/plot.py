@@ -69,6 +69,10 @@ def load_results_datasets(
             plot_df[AggregateProperties.SURFACE_AREA.value]
             / plot_df[AggregateProperties.VOLUME.value]
         )
+        plot_df[AggregateProperties.VOL_PER_SURFACTANT.value] = (
+            plot_df[AggregateProperties.VOLUME.value]
+            / plot_df[AggregateProperties.AGGREGATION_NUMBERS.value]
+        )
     except KeyError:
         pass
 
@@ -651,7 +655,7 @@ def main():
             properties={
                 AggregateProperties.AGGREGATION_NUMBERS,
                 AggregateProperties.SURFACE_AREA_PER_SURFACTANT,
-                AggregateProperties.VOLUME,
+                AggregateProperties.VOL_PER_SURFACTANT,
                 AggregateProperties.SURFACE_AREA_TO_VOLUME,
                 AggregateProperties.RADIUS_OF_GYRATION,
             },

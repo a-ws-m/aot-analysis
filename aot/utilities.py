@@ -57,8 +57,9 @@ class AggregateProperties(Enum):
     EAC = r"$e_{ac}$"
     RADIUS_OF_GYRATION = r"Radius of gyration ($\mathrm{\AA}$)"
     VOLUME = r"Volume ($\mathrm{\AA}^3$)"
+    VOL_PER_SURFACTANT = r"Volume per surfactant ($\mathrm{\AA}^3$)"
     SURFACE_AREA = r"Surface area ($\mathrm{\AA}^2$)"
-    SURFACE_AREA_PER_SURFACTANT = r"Surfactant surface area ($\mathrm{\AA}^2$)"
+    SURFACE_AREA_PER_SURFACTANT = r"Surface area per surfactant ($\mathrm{\AA}^2$)"
     SURFACE_AREA_TO_VOLUME = r"Surface area / Volume ($\mathrm{\AA}^{-1}$)"
     NORMALISED_AGGREGATION_NUMBERS = "Normalised aggregation numbers"
     TOTAL_VOLUME = r"Total excluded volume estimate ($\mathrm{\AA}^3$)"
@@ -75,6 +76,7 @@ class AggregateProperties(Enum):
         return cls.all().difference(
             {
                 cls.VOLUME,
+                cls.VOL_PER_SURFACTANT,
                 cls.SURFACE_AREA,
                 cls.SURFACE_AREA_PER_SURFACTANT,
                 cls.SURFACE_AREA_TO_VOLUME,
