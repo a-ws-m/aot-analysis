@@ -81,6 +81,9 @@ class AggregateProperties(Enum):
                 cls.SURFACE_AREA_PER_SURFACTANT,
                 cls.SURFACE_AREA_TO_VOLUME,
                 cls.TOTAL_VOLUME,
+                cls.SOAP_VECTOR,
+                cls.SOAP_SIM_1,
+                cls.SOAP_SIM_2,
             }
         )
 

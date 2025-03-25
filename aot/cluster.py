@@ -519,7 +519,12 @@ class MicelleAdjacency(AnalysisBase):
         self.df = pd.concat([self.df, pd.DataFrame(data)], ignore_index=True)
         self.df.sort_values("Frame", inplace=True, ignore_index=True)
 
-        if AggregateProperties.SOAP_VECTOR.value in self.df.columns:
+        if (
+            AggregateProperties.SOAP_VECTOR.value in self.df.columns
+            and self.properties.intersection(
+                {AggregateProperties.SOAP_SIM_1, AggregateProperties.SOAP_SIM_2}
+            )
+        ):
             pipe = Pipeline(
                 [
                     ("scaler", StandardScaler()),
