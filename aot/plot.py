@@ -32,7 +32,6 @@ def load_results_datasets(
             print(f"Found existing files for {result.plot_name}.")
             this_df = pd.read_csv(df_path, index_col=0)
 
-        this_df.drop(AggregateProperties.SOAP_VECTOR.value, axis=1, inplace=True)
         this_df = this_df[this_df["Frame"] <= end] if end is not None else this_df
         this_df = this_df[
             this_df[AggregateProperties.AGGREGATION_NUMBERS.value] >= min_cluster_size

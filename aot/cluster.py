@@ -545,6 +545,13 @@ class MicelleAdjacency(AnalysisBase):
             self.df[AggregateProperties.SOAP_SIM_1.value] = soap_sim_1
             self.df[AggregateProperties.SOAP_SIM_2.value] = soap_sim_2
 
+        # Don't save the SOAP vectors to disk. This bloats the CSV unnecessarily.
+        self.df.drop(
+            columns=[AggregateProperties.SOAP_VECTOR.value],
+            errors="ignore",
+            inplace=True,
+        )
+
     def save(self, adj_path: Path, df_path: Path):
         save_sparse(self.adj_mats, adj_path)
         self.df.to_csv(df_path)
