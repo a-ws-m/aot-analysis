@@ -371,11 +371,7 @@ class MicelleAdjacency(AnalysisBase):
                 # We'll need to add new entries to the DataFrame
 
             if self.do_calculate(
-                AggregateProperties.VOLUME
-                | AggregateProperties.SURFACE_AREA
-                | AggregateProperties.VOL_PER_SURFACTANT
-                | AggregateProperties.SURFACE_AREA_PER_SURFACTANT
-                | AggregateProperties.SURFACE_AREA_TO_VOLUME,
+                AggregateProperties.VOLUME | AggregateProperties.SURFACE_AREA,
                 current_agg_entry,
             ):
                 vol, surf = willard_chandler(
