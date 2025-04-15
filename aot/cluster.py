@@ -81,6 +81,69 @@ def atom_to_mol_pairs(atom_pairs: np.ndarray, atom_per_mol: int) -> np.ndarray:
 
     return mol_pairs[mask]
 
+def vesicality(tailgroups: AtomGroup):
+    """Determine 'vesicality' of a cluster.
+    
+    'Vesicality' is a measure of how well the aggregate matches a spherical
+    bilayer. We first describe the molecules in the cluster as vectors, pointing
+    from the centre of the tail group to the centre of the head group. We
+    express this vector field in spherical coordinates. In a vesicle, there will
+    be a pair of antisymmetric vectors at a similar theta/phi. We can take the
+    dot product of the orientation vector with its displacement vector from the
+    center of geometry of the cluster to get the scalar orientation relative to
+    the centre, $o$.
+    
+    We can partition the aggregate into two layers: inward ($o < 0$) and outward
+    ($o > 0$). The expected area of a shell is $A = 4 \pi r^2$, where $r$ is the
+    radius of the shell, and the expected number of surfactant molecules should
+    be proportional. Therefore, the ratio of the number in each layer is given
+    by $N_{in} / N_{out} = r_{in}^2 / r_{out}^2$. We can therefore calculate the
+    vesicality as $v = \\frac{N_{in} r_{out}^2}{N_{out} r_{in}^2}$. If $N_{in} =
+    0$, we define $v = 0$.
+
+    """
+    agg_cog = tailgroups.center_of_geometry()
+
+    outer_hg_radii = []
+    inner_hg_radii = []
+
+    resids = tailgroups.residues.unique
+
+    for res in resids:
+        headgroup = res.atoms.difference(tailgroups)
+        tailgroup = res.atoms.intersection(tailgroups)
+        
+        hg_cog = headgroup.center_of_geometry()
+        tail_cog = tailgroup.center_of_geometry()
+
+        # Get the orientation vector
+        orientation = hg_cog - tail_cog
+        orientation /= np.linalg.norm(orientation)
+
+        from_agg_centre = hg_cog - agg_cog
+        dist_from_centre = np.linalg.norm(from_agg_centre)
+
+        from_agg_centre /= dist_from_centre
+        scalar_orientation = np.dot(orientation, from_agg_centre)
+
+        radii_list = outer_hg_radii if scalar_orientation > 0 else inner_hg_radii
+        radii_list.append(dist_from_centre)
+    
+    # Get the number of molecules in each layer
+    n_outer = len(outer_hg_radii)
+    n_inner = len(inner_hg_radii)
+
+    if n_outer == 0:
+        return 0
+
+    # Get the average radius of each layer
+    r_outer = np.mean(outer_hg_radii)
+    r_inner = np.mean(inner_hg_radii)
+
+    # Calculate the vesicality
+    return (n_inner * r_outer**2) / (n_outer * r_inner**2)
+
+
 
 def radius_of_gyration(group: AtomGroup) -> float:
     """Calculate the radius of gyration for a given group of atoms."""
