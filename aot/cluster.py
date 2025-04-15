@@ -81,9 +81,10 @@ def atom_to_mol_pairs(atom_pairs: np.ndarray, atom_per_mol: int) -> np.ndarray:
 
     return mol_pairs[mask]
 
+
 def vesicality(tailgroups: AtomGroup):
-    """Determine 'vesicality' of a cluster.
-    
+    r"""Determine 'vesicality' of a cluster.
+
     'Vesicality' is a measure of how well the aggregate matches a spherical
     bilayer. We first describe the molecules in the cluster as vectors, pointing
     from the centre of the tail group to the centre of the head group. We
@@ -92,27 +93,36 @@ def vesicality(tailgroups: AtomGroup):
     dot product of the orientation vector with its displacement vector from the
     center of geometry of the cluster to get the scalar orientation relative to
     the centre, $o$.
-    
+
     We can partition the aggregate into two layers: inward ($o < 0$) and outward
     ($o > 0$). The expected area of a shell is $A = 4 \pi r^2$, where $r$ is the
     radius of the shell, and the expected number of surfactant molecules should
     be proportional. Therefore, the ratio of the number in each layer is given
     by $N_{in} / N_{out} = r_{in}^2 / r_{out}^2$. We can therefore calculate the
-    vesicality as $v = \\frac{N_{in} r_{out}^2}{N_{out} r_{in}^2}$. If $N_{in} =
+    vesicality as $v = \frac{N_{in} r_{out}^2}{N_{out} r_{in}^2}$. If $N_{in} =
     0$, we define $v = 0$.
+
+    TODO: This function doesn't quite work as described. We use the sum of the
+    $o$ values instead of $N$, and the weighted averages of the $r$ values. This
+    was done to avoid issues where curved, but not closed bicelles would have
+    high vesicality values. This also means that the interpretation of the
+    metric needs to change. Generally, values close to, or greater than 1 are
+    vesicles.
 
     """
     agg_cog = tailgroups.center_of_geometry()
 
-    outer_hg_radii = []
-    inner_hg_radii = []
+    outer_hg_radii: list[float] = []
+    inner_hg_radii: list[float] = []
+    outer_weights: list[float] = []
+    inner_weights: list[float] = []
 
     resids = tailgroups.residues.unique
 
     for res in resids:
         headgroup = res.atoms.difference(tailgroups)
         tailgroup = res.atoms.intersection(tailgroups)
-        
+
         hg_cog = headgroup.center_of_geometry()
         tail_cog = tailgroup.center_of_geometry()
 
@@ -127,22 +137,28 @@ def vesicality(tailgroups: AtomGroup):
         scalar_orientation = np.dot(orientation, from_agg_centre)
 
         radii_list = outer_hg_radii if scalar_orientation > 0 else inner_hg_radii
-        radii_list.append(dist_from_centre)
-    
-    # Get the number of molecules in each layer
-    n_outer = len(outer_hg_radii)
-    n_inner = len(inner_hg_radii)
+        weights_list = outer_weights if scalar_orientation > 0 else inner_weights
 
-    if n_outer == 0:
+        radii_list.append(dist_from_centre)
+        weights_list.append(np.abs(scalar_orientation))
+
+    # Get the number of molecules in each layer
+    n_outer = np.sum(outer_weights)
+    n_inner = np.sum(inner_weights)
+
+    if n_inner == 0:
         return 0
+    if n_outer == 0:
+        raise ValueError(
+            "No outer layer headgroups found -- could be an inverse micelle?"
+        )
 
     # Get the average radius of each layer
-    r_outer = np.mean(outer_hg_radii)
-    r_inner = np.mean(inner_hg_radii)
+    r_outer = np.average(outer_hg_radii, weights=outer_weights)
+    r_inner = np.average(inner_hg_radii, weights=inner_weights)
 
     # Calculate the vesicality
     return (n_inner * r_outer**2) / (n_outer * r_inner**2)
-
 
 
 def radius_of_gyration(group: AtomGroup) -> float:
@@ -378,6 +394,8 @@ class MicelleAdjacency(AnalysisBase):
 
         self.radii_of_gyration: list[float] = []
 
+        self.vesicalities: list[float] = []  # Add vesicality storage
+
         self.soap: Optional[SOAP] = None
         if HAS_DSCRIBE:
             r_cut = 3 * self.cutoff
@@ -531,6 +549,15 @@ class MicelleAdjacency(AnalysisBase):
                         AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value,
                     ] = norm_agg_num
 
+            if self.do_calculate(AggregateProperties.VESICALITY, current_agg_entry):
+                vesicality_value = vesicality(agg_residues.atoms & self.tailgroups)
+                if current_idx is None:
+                    self.vesicalities.append(vesicality_value)
+                else:
+                    self.df.loc[current_idx, AggregateProperties.VESICALITY.value] = (
+                        vesicality_value
+                    )
+
             if self.do_calculate(
                 AggregateProperties.SOAP_SIM_1 | AggregateProperties.SOAP_SIM_2,
                 current_agg_entry,
@@ -571,6 +598,7 @@ class MicelleAdjacency(AnalysisBase):
             AggregateProperties.VOLUME.value: self.volume,
             AggregateProperties.SURFACE_AREA.value: self.surface,
             AggregateProperties.TOTAL_VOLUME.value: self.total_volume,
+            AggregateProperties.VESICALITY.value: self.vesicalities,  # Add vesicality to DataFrame
             AggregateProperties.SOAP_VECTOR.value: self.soap_vectors,
         }
         data = {key: val for key, val in data.items() if len(val)}

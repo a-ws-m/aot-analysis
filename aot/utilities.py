@@ -66,6 +66,7 @@ class AggregateProperties(Enum):
     SOAP_VECTOR = "SOAP vector"
     SOAP_SIM_1 = "Principal component 1 of SOAP KPCA"
     SOAP_SIM_2 = "Principal component 2 of SOAP KPCA"
+    VESICALITY = "Vesicality"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':
