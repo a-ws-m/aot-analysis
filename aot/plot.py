@@ -460,6 +460,13 @@ def main():
         help="End the analysis at this frame.",
     )
     parser.add_argument(
+        "-m",
+        "--min-size",
+        default=5,
+        type=int,
+        help="Minimum cluster size to consider. WARNING: You must overwrite or use `--no-calc` if you change this.",
+    )
+    parser.add_argument(
         "--end-time",
         type=int,
         default=-1,
@@ -567,7 +574,7 @@ def main():
     if not args.no_calc:
         batch_ma_analysis(
             results,
-            min_cluster_size=5,
+            min_cluster_size=args.min_size,
             step=args.step_size,
             overwrite=args.overwrite,
             properties=properties,
@@ -580,6 +587,7 @@ def main():
             WORKING_DIR / "clustering-comp.pdf",
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.agg_num:
@@ -591,6 +599,7 @@ def main():
             hue=None,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
         compare_val(
             results,
@@ -599,10 +608,17 @@ def main():
             end=end,
             end_time=end_time,
             round_=1,
+            min_cluster_size=args.min_size,
         )
 
     if args.cpe:
-        compare_cpe(results, WORKING_DIR / "cpe-comp.pdf", end=end, end_time=end_time)
+        compare_cpe(
+            results,
+            WORKING_DIR / "cpe-comp.pdf",
+            end=end,
+            end_time=end_time,
+            min_cluster_size=args.min_size,
+        )
 
     if args.rog:
         compare_val(
@@ -611,6 +627,7 @@ def main():
             AggregateProperties.RADIUS_OF_GYRATION.value,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.vol:
@@ -620,6 +637,7 @@ def main():
             AggregateProperties.VOLUME.value,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.surf:
@@ -629,6 +647,7 @@ def main():
             AggregateProperties.SURFACE_AREA.value,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
         compare_dist(
             results,
@@ -636,6 +655,7 @@ def main():
             AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.sa_ratio:
@@ -646,6 +666,7 @@ def main():
             ylim=(0, 1),
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.one_per_conc:
@@ -660,6 +681,7 @@ def main():
             },
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.total_vol:
@@ -669,6 +691,7 @@ def main():
             AggregateProperties.TOTAL_VOLUME.value,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
     if args.soap_similarity:
@@ -676,6 +699,7 @@ def main():
             results,
             end=end,
             end_time=end_time,
+            min_cluster_size=args.min_size,
         )
 
 
