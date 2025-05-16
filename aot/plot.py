@@ -5,7 +5,8 @@ from typing import Optional
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-from MDAnalysis.analysis.rdf import InterRDF
+from MDAnalysis.analysis.distances import self_distance_array
+from tqdm import tqdm
 
 from .cluster import batch_ma_analysis
 from .utilities import *
@@ -422,6 +423,72 @@ def tail_rdf(results: "list[CoarseResults]", graph_file: Path, step=10, start=0)
     g.savefig(graph_file, transparent=False)
 
 
+def plot_coordnum(
+    results: "list[CoarseResults]",
+    file_template: str = "coordnum-{percent}.pdf",
+    step: int = 1000,
+    start: int = 0,
+):
+    """Plot the coordination numbers at different radial cutoffs for a given number of timesteps.
+
+    This function calculates the total coordination number between tailgroup
+    beads at `num` uniform intervals. The results are plotted as a function of
+    the radial cutoff. Each model is on the same plot, but there is one plot per
+    timestep. Each timestep subplot is given a title indicating the number of
+    aggregates at that timestep, and the average aggregation number.
+
+    """
+    data = {
+        r"Distances ($\mathrm{\AA}$)": [],
+        "Time (ns)": [],
+        "Mapping": [],
+        "% AOT": [],
+    }
+
+    for result in results:
+        u = result.universe()
+        tail_atoms = u.select_atoms(result.tail_match)
+
+        num_combinations = len(tail_atoms) * (len(tail_atoms) - 1) // 2
+        dists = np.empty((num_combinations), dtype=float)
+
+        for ts in tqdm(
+            u.trajectory[start::step],
+            desc=f"Calculating RDFs for {result.plot_name}",
+        ):
+            # Calculate the RDF
+            self_distance_array(tail_atoms, box=u.dimensions, result=dists)
+
+            new_data = pd.DataFrame(
+                {
+                    r"Distances ($\mathrm{\AA}$)": dists,
+                    "Time (ns)": [ts.time * 1e-3] * num_combinations,
+                    "Mapping": [result.coarseness.friendly_name] * num_combinations,
+                    "% AOT": [str(result.percent_aot)] * num_combinations,
+                }
+            )
+            for key in data.keys():
+                data[key] += new_data[key].tolist()
+
+    df = pd.DataFrame(data)
+
+    for percent_aot in df["% AOT"].unique():
+        plot_df = df[df["% AOT"] == percent_aot]
+
+        # Plot the results
+        g = sns.displot(
+            data=plot_df,
+            x=r"Distances ($\mathrm{\AA}$)",
+            col="Time (ns)",
+            col_wrap=3,
+            hue="Mapping",
+            kind="ecdf",
+            facet_kws={"margin_titles": True, "despine": False},
+        )
+        g.tight_layout()
+        g.savefig(file_template.format(percent=percent_aot), transparent=False)
+
+
 def main():
     """Commandline interface for program."""
     sns.set_theme(context="paper", palette="colorblind")
@@ -541,6 +608,11 @@ def main():
         action="store_true",
         help="Compute the KPCA reduction of the SOAP vectors for each aggregate.",
     )
+    plot_options.add_argument(
+        "--coordnum",
+        action="store_true",
+        help="Plot the coordination numbers at different radial cutoffs.",
+    )
 
     args = parser.parse_args()
 
@@ -563,6 +635,14 @@ def main():
             WORKING_DIR / "tail-rdf.pdf",
             step=args.step_size,
             start=args.start,
+        )
+        return
+
+    if args.coordnum:
+        plot_coordnum(
+            results,
+            start=args.start,
+            step=args.step_size,
         )
         return
 
