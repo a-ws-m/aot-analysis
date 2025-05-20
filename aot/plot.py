@@ -489,6 +489,77 @@ def plot_coordnum(
         g.savefig(file_template.format(percent=percent_aot), transparent=False)
 
 
+def plot_vesicle_contents(
+    results: list[AtomisticResults | CoarseResults],
+    graph_file: Path,
+    use_interval: bool = False,
+    interval: int = 50,
+    min_cluster_size: int = 5,
+    end: Optional[int] = None,
+    end_time: Optional[int] = None,
+):
+    """Plot the contents inside vesicles (counterions, water, inner AOT molecules)."""
+    plot_df = load_results_datasets(
+        tuple(results), min_cluster_size, end=end, end_time=end_time
+    )
+
+    if use_interval:
+        plot_df = plot_df[plot_df["Frame"] % interval == 0]
+
+    # Filter for structures with vesicality > 0.5 (reasonably vesicle-like)
+    plot_df = plot_df[plot_df[AggregateProperties.VESICALITY.value] > 0.5]
+
+    # Melt the dataframe to get the contents data in long format
+    content_cols = [
+        AggregateProperties.COUNTERIONS_INSIDE.value,
+        AggregateProperties.WATER_INSIDE.value,
+        AggregateProperties.INNER_AOT.value,
+    ]
+
+    plot_dfm = plot_df.melt(
+        id_vars=["% AOT", "Type", TIME_COL, AggregateProperties.VESICALITY.value],
+        value_vars=content_cols,
+        var_name="Content Type",
+        value_name="Count",
+    )
+
+    print("Plotting vesicle contents...")
+
+    # Create the plot
+    g = sns.relplot(
+        data=plot_dfm,
+        x=TIME_COL,
+        y="Count",
+        col="% AOT",
+        hue="Content Type",
+        row="Type",
+        kind="line",
+        errorbar="ci",
+        facet_kws={"margin_titles": True, "despine": False},
+    )
+
+    g.set_titles(col_template="{col_name}% AOT", row_template="{row_name}")
+    g.tight_layout()
+    g.savefig(graph_file, transparent=False)
+
+    # Create a scatter plot of vesicality vs. content
+    h = sns.relplot(
+        data=plot_dfm,
+        x=AggregateProperties.VESICALITY.value,
+        y="Count",
+        col="Content Type",
+        hue="Type",
+        row="% AOT",
+        kind="scatter",
+        alpha=0.7,
+        facet_kws={"margin_titles": True, "despine": False},
+    )
+
+    h.set_titles(row_template="{row_name}% AOT", col_template="{col_name}")
+    h.tight_layout()
+    h.savefig(str(graph_file).replace(".pdf", "-vs-vesicality.pdf"), transparent=False)
+
+
 def main():
     """Commandline interface for program."""
     sns.set_theme(context="paper", palette="colorblind")
@@ -613,6 +684,11 @@ def main():
         action="store_true",
         help="Plot the coordination numbers at different radial cutoffs.",
     )
+    plot_options.add_argument(
+        "--vesicle-contents",
+        action="store_true",
+        help="Plot the number of counterions, water molecules, and inner AOT in vesicles.",
+    )
 
     args = parser.parse_args()
 
@@ -652,6 +728,14 @@ def main():
 
     if args.total_vol:
         properties |= {AggregateProperties.TOTAL_VOLUME}
+
+    if args.vesicle_contents:
+        properties |= {
+            AggregateProperties.VESICALITY,
+            AggregateProperties.COUNTERIONS_INSIDE,
+            AggregateProperties.WATER_INSIDE,
+            AggregateProperties.INNER_AOT,
+        }
 
     if not args.no_calc:
         batch_ma_analysis(
@@ -780,6 +864,15 @@ def main():
     if args.soap_similarity:
         compare_soap_similarity(
             results,
+            end=end,
+            end_time=end_time,
+            min_cluster_size=args.min_size,
+        )
+
+    if args.vesicle_contents:
+        plot_vesicle_contents(
+            results,
+            WORKING_DIR / "vesicle-contents.pdf",
             end=end,
             end_time=end_time,
             min_cluster_size=args.min_size,

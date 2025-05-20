@@ -204,6 +204,112 @@ def willard_chandler(
     return volume, surf
 
 
+def count_inside_vesicle(
+    aggregate: AtomGroup, tailgroups: AtomGroup, resname: str
+) -> int:
+    """Count the number of entities with a specific resname inside the vesicle.
+
+    The vesicle interior is defined as a sphere with radius equal to the average
+    of the inner and outer headgroup layer radii.
+    """
+    agg_cog = tailgroups.center_of_geometry()
+    universe = tailgroups.universe
+
+    # Calculate inner and outer radii similar to vesicality()
+    outer_hg_radii: list[float] = []
+    inner_hg_radii: list[float] = []
+    outer_weights: list[float] = []
+    inner_weights: list[float] = []
+
+    resids = tailgroups.residues.unique
+
+    for res in resids:
+        headgroup = res.atoms.difference(tailgroups)
+        tailgroup = res.atoms.intersection(tailgroups)
+
+        hg_cog = headgroup.center_of_geometry()
+        tail_cog = tailgroup.center_of_geometry()
+
+        # Get the orientation vector
+        orientation = hg_cog - tail_cog
+        orientation /= np.linalg.norm(orientation)
+
+        from_agg_centre = hg_cog - agg_cog
+        dist_from_centre = np.linalg.norm(from_agg_centre)
+
+        from_agg_centre /= dist_from_centre
+        scalar_orientation = np.dot(orientation, from_agg_centre)
+
+        radii_list = outer_hg_radii if scalar_orientation > 0 else inner_hg_radii
+        weights_list = outer_weights if scalar_orientation > 0 else inner_weights
+
+        radii_list.append(dist_from_centre)
+        weights_list.append(np.abs(scalar_orientation))
+
+    # If there's no inner layer, return 0
+    if not inner_hg_radii:
+        return 0
+
+    # Get the average radius of each layer
+    r_outer = np.average(outer_hg_radii, weights=outer_weights)
+    r_inner = np.average(inner_hg_radii, weights=inner_weights)
+
+    # Calculate shell radius (average of inner and outer radii)
+    shell_radius = r_inner  # Use inner radius as cutoff
+
+    # Select entities with matching resname
+    target_entities = aggregate.universe.select_atoms(f"resname {resname}")
+
+    # Count entities within the shell radius from the center of geometry
+    count = 0
+    box = aggregate.universe.dimensions
+    for atom in target_entities:
+        # Calculate distance considering PBC
+        diff = atom.position - agg_cog
+        # Apply minimum image convention
+        for i in range(3):
+            if diff[i] > box[i] / 2:
+                diff[i] -= box[i]
+            elif diff[i] < -box[i] / 2:
+                diff[i] += box[i]
+        distance = np.linalg.norm(diff)
+        if distance < shell_radius:
+            count += 1
+
+    return count
+
+
+def count_inner_aot(tailgroups: AtomGroup) -> int:
+    """Count the number of AOT molecules in the inner layer of a vesicle."""
+    agg_cog = tailgroups.center_of_geometry()
+    inner_layer_count = 0
+
+    resids = tailgroups.residues.unique
+
+    for res in resids:
+        headgroup = res.atoms.difference(tailgroups)
+        tailgroup = res.atoms.intersection(tailgroups)
+
+        hg_cog = headgroup.center_of_geometry()
+        tail_cog = tailgroup.center_of_geometry()
+
+        # Get the orientation vector
+        orientation = hg_cog - tail_cog
+        orientation /= np.linalg.norm(orientation)
+
+        from_agg_centre = hg_cog - agg_cog
+        dist_from_centre = np.linalg.norm(from_agg_centre)
+
+        from_agg_centre /= dist_from_centre
+        scalar_orientation = np.dot(orientation, from_agg_centre)
+
+        # If scalar_orientation is negative, it's an inner layer molecule
+        if scalar_orientation < 0:
+            inner_layer_count += 1
+
+    return inner_layer_count
+
+
 def get_cpe(atoms: AtomGroup):
     """
     Compute coordinate pair eccentricities for a given set of semi-axes.
@@ -394,7 +500,12 @@ class MicelleAdjacency(AnalysisBase):
 
         self.radii_of_gyration: list[float] = []
 
-        self.vesicalities: list[float] = []  # Add vesicality storage
+        self.vesicalities: list[float] = []
+
+        # Add storage for new properties
+        self.counterions_inside: list[int] = []
+        self.water_inside: list[int] = []
+        self.inner_aot: list[int] = []
 
         self.soap: Optional[SOAP] = None
         if HAS_DSCRIBE:
@@ -559,6 +670,39 @@ class MicelleAdjacency(AnalysisBase):
                     )
 
             if self.do_calculate(
+                AggregateProperties.COUNTERIONS_INSIDE, current_agg_entry
+            ):
+                counterions_count = count_inside_vesicle(
+                    agg_residues, agg_residues.atoms & self.tailgroups, "NA"
+                )
+                if current_idx is None:
+                    self.counterions_inside.append(counterions_count)
+                else:
+                    self.df.loc[
+                        current_idx, AggregateProperties.COUNTERIONS_INSIDE.value
+                    ] = counterions_count
+
+            if self.do_calculate(AggregateProperties.WATER_INSIDE, current_agg_entry):
+                water_count = count_inside_vesicle(
+                    agg_residues, agg_residues.atoms & self.tailgroups, "W"
+                )
+                if current_idx is None:
+                    self.water_inside.append(water_count)
+                else:
+                    self.df.loc[current_idx, AggregateProperties.WATER_INSIDE.value] = (
+                        water_count
+                    )
+
+            if self.do_calculate(AggregateProperties.INNER_AOT, current_agg_entry):
+                inner_aot_count = count_inner_aot(agg_residues.atoms & self.tailgroups)
+                if current_idx is None:
+                    self.inner_aot.append(inner_aot_count)
+                else:
+                    self.df.loc[current_idx, AggregateProperties.INNER_AOT.value] = (
+                        inner_aot_count
+                    )
+
+            if self.do_calculate(
                 AggregateProperties.SOAP_SIM_1 | AggregateProperties.SOAP_SIM_2,
                 current_agg_entry,
             ):
@@ -598,7 +742,10 @@ class MicelleAdjacency(AnalysisBase):
             AggregateProperties.VOLUME.value: self.volume,
             AggregateProperties.SURFACE_AREA.value: self.surface,
             AggregateProperties.TOTAL_VOLUME.value: self.total_volume,
-            AggregateProperties.VESICALITY.value: self.vesicalities,  # Add vesicality to DataFrame
+            AggregateProperties.VESICALITY.value: self.vesicalities,
+            AggregateProperties.COUNTERIONS_INSIDE.value: self.counterions_inside,
+            AggregateProperties.WATER_INSIDE.value: self.water_inside,
+            AggregateProperties.INNER_AOT.value: self.inner_aot,
             AggregateProperties.SOAP_VECTOR.value: self.soap_vectors,
         }
         data = {key: val for key, val in data.items() if len(val)}

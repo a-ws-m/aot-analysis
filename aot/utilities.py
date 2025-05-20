@@ -52,6 +52,8 @@ def load_sparse(file) -> dict[int, coo_array]:
 
 
 class AggregateProperties(Enum):
+    """Enumeration of the properties that can be calculated for an aggregate."""
+
     AGGREGATION_NUMBERS = "Aggregation numbers"
     EAB = r"$e_{ab}$"
     EAC = r"$e_{ac}$"
@@ -67,6 +69,9 @@ class AggregateProperties(Enum):
     SOAP_SIM_1 = "Principal component 1 of SOAP KPCA"
     SOAP_SIM_2 = "Principal component 2 of SOAP KPCA"
     VESICALITY = "Vesicality"
+    COUNTERIONS_INSIDE = "Counterions inside"
+    WATER_INSIDE = "Water molecules inside"
+    INNER_AOT = "Inner layer AOT molecules"
 
     @classmethod
     def all(cls) -> 'set["AggregateProperties"]':

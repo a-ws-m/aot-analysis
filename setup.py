@@ -28,8 +28,8 @@ setup(
     entry_points={
         "console_scripts": [
             "aot_cluster=aot.plot:main",
-            "aot_extract=scripts.extract_cluster:main",
+            "aot_extract=aot.scripts.extract_cluster:main",
         ],
     },
-    python_requires=">=3.7",
+    python_requires=">=3.9",
 )
