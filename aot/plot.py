@@ -37,8 +37,8 @@ def load_results_datasets(
         this_df = this_df[
             this_df[AggregateProperties.AGGREGATION_NUMBERS.value] >= min_cluster_size
         ]
-        this_df = this_df.groupby("Time (ps)").mean()
-        this_df["Time (ps)"] = this_df.index
+        # this_df = this_df.groupby("Time (ps)").mean()
+        # this_df["Time (ps)"] = this_df.index
         this_df["% AOT"] = result.percent_aot
         this_df["Simulation"] = result.plot_name
         this_df["Type"] = (
@@ -59,6 +59,8 @@ def load_results_datasets(
     plot_df["Norm. agg. number"] = plot_df[
         AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value
     ]
+
+    print(plot_df.head())
 
     try:
         plot_df[AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value] = (
@@ -136,6 +138,7 @@ def compare_dist(
     plot_df = load_results_datasets(
         tuple(results), min_cluster_size, end=end, end_time=end_time
     )
+    # print(plot_df.describe())
 
     if use_interval:
         plot_df = plot_df[plot_df["Frame"] % interval == 0]
@@ -428,6 +431,7 @@ def plot_coordnum(
     file_template: str = "coordnum-{percent}.pdf",
     step: int = 1000,
     start: int = 0,
+    end: Optional[int] = None,
 ):
     """Plot the coordination numbers at different radial cutoffs for a given number of timesteps.
 
@@ -437,6 +441,8 @@ def plot_coordnum(
     timestep. Each timestep subplot is given a title indicating the number of
     aggregates at that timestep, and the average aggregation number.
 
+    If there's only one mapping in the results, all distributions will be plotted
+    on a single axis with time as the hue.
     """
     data = {
         r"Distances ($\mathrm{\AA}$)": [],
@@ -452,8 +458,13 @@ def plot_coordnum(
         num_combinations = len(tail_atoms) * (len(tail_atoms) - 1) // 2
         dists = np.empty((num_combinations), dtype=float)
 
+        # Handle slice with optional end parameter
+        trajectory_slice = u.trajectory[start::step]
+        if end is not None and end > 0:
+            trajectory_slice = u.trajectory[start:end:step]
+
         for ts in tqdm(
-            u.trajectory[start::step],
+            trajectory_slice,
             desc=f"Calculating RDFs for {result.plot_name}",
         ):
             # Calculate the RDF
@@ -475,16 +486,34 @@ def plot_coordnum(
     for percent_aot in df["% AOT"].unique():
         plot_df = df[df["% AOT"] == percent_aot]
 
-        # Plot the results
-        g = sns.displot(
-            data=plot_df,
-            x=r"Distances ($\mathrm{\AA}$)",
-            col="Time (ns)",
-            col_wrap=3,
-            hue="Mapping",
-            kind="ecdf",
-            facet_kws={"margin_titles": True, "despine": False},
-        )
+        # Check if there's only one mapping
+        unique_mappings = plot_df["Mapping"].unique()
+        single_mapping = len(unique_mappings) == 1
+
+        if single_mapping:
+            # Plot all distributions on a single axis with time as the hue
+            g = sns.displot(
+                data=plot_df,
+                x=r"Distances ($\mathrm{\AA}$)",
+                hue="Time (ns)",
+                kind="ecdf",
+                palette="viridis",
+                facet_kws={"despine": False},
+                alpha=0.7,
+            )
+            g.set_titles(f"{percent_aot}% AOT - {unique_mappings[0]}")
+        else:
+            # Original behavior: plot with mapping as hue and time as columns
+            g = sns.displot(
+                data=plot_df,
+                x=r"Distances ($\mathrm{\AA}$)",
+                col="Time (ns)",
+                col_wrap=3,
+                hue="Mapping",
+                kind="ecdf",
+                facet_kws={"margin_titles": True, "despine": False},
+            )
+
         g.tight_layout()
         g.savefig(file_template.format(percent=percent_aot), transparent=False)
 
@@ -689,6 +718,11 @@ def main():
         action="store_true",
         help="Plot the number of counterions, water molecules, and inner AOT in vesicles.",
     )
+    plot_options.add_argument(
+        "--disable-interval",
+        action="store_true",
+        help="Disable the use of intervals when plotting. This will plot every frame.",
+    )
 
     args = parser.parse_args()
 
@@ -719,6 +753,7 @@ def main():
             results,
             start=args.start,
             step=args.step_size,
+            end=end,
         )
         return
 
@@ -762,6 +797,7 @@ def main():
             WORKING_DIR / "agg-num-comp.pdf",
             "Normalised aggregation numbers",
             # ylim=(0, 1.01),
+            use_interval=not args.disable_interval,
             hue=AggregateProperties.VESICALITY.value,
             hue_norm=(0, 1),
             end=end,
@@ -802,6 +838,7 @@ def main():
             results,
             WORKING_DIR / "vol-comp.pdf",
             AggregateProperties.VOLUME.value,
+            use_interval=not args.disable_interval,
             end=end,
             end_time=end_time,
             min_cluster_size=args.min_size,
@@ -812,6 +849,7 @@ def main():
             results,
             WORKING_DIR / "surf-comp.pdf",
             AggregateProperties.SURFACE_AREA.value,
+            use_interval=not args.disable_interval,
             end=end,
             end_time=end_time,
             min_cluster_size=args.min_size,
@@ -820,6 +858,7 @@ def main():
             results,
             WORKING_DIR / "norm-surf-comp.pdf",
             AggregateProperties.SURFACE_AREA_PER_SURFACTANT.value,
+            use_interval=not args.disable_interval,
             end=end,
             end_time=end_time,
             min_cluster_size=args.min_size,
@@ -830,6 +869,7 @@ def main():
             results,
             WORKING_DIR / "sa-ratio-comp.pdf",
             AggregateProperties.SURFACE_AREA_TO_VOLUME.value,
+            use_interval=not args.disable_interval,
             ylim=(0, 1),
             end=end,
             end_time=end_time,
@@ -856,6 +896,7 @@ def main():
             results,
             WORKING_DIR / "total-vol-comp.pdf",
             AggregateProperties.TOTAL_VOLUME.value,
+            use_interval=not args.disable_interval,
             end=end,
             end_time=end_time,
             min_cluster_size=args.min_size,
