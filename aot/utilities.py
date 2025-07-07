@@ -90,6 +90,9 @@ class AggregateProperties(Enum):
                 cls.SOAP_VECTOR,
                 cls.SOAP_SIM_1,
                 cls.SOAP_SIM_2,
+                cls.COUNTERIONS_INSIDE,
+                cls.WATER_INSIDE,
+                cls.INNER_AOT,
             }
         )
 
