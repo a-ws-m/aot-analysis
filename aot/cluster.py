@@ -149,16 +149,15 @@ def vesicality(tailgroups: AtomGroup):
     if n_inner == 0:
         return 0
     if n_outer == 0:
-        raise ValueError(
-            "No outer layer headgroups found -- could be an inverse micelle?"
-        )
+        print("No outer layer headgroups found -- could be an inverse micelle?")
+        return 0
 
     # Get the average radius of each layer
     r_outer = np.average(outer_hg_radii, weights=outer_weights)
     r_inner = np.average(inner_hg_radii, weights=inner_weights)
 
     # Calculate the vesicality
-    return (n_inner * r_outer**2) / (n_outer * r_inner**2)
+    return min((n_inner * r_outer**2) / (n_outer * r_inner**2), 1.0)
 
 
 def radius_of_gyration(group: AtomGroup) -> float:
@@ -247,7 +246,7 @@ def count_inside_vesicle(
         weights_list.append(np.abs(scalar_orientation))
 
     # If there's no inner layer, return 0
-    if not inner_hg_radii:
+    if not inner_hg_radii or not outer_hg_radii:
         return 0
 
     # Get the average radius of each layer
