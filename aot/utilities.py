@@ -1,5 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor as Pool
 from enum import Enum
-from multiprocessing import Pool
 from pathlib import Path
 from typing import NamedTuple, Union
 
@@ -44,8 +44,6 @@ def _load_frame_data(args):
 
 def load_sparse(file) -> dict[int, coo_array]:
     """Load a sparse array from disk using multiprocessing."""
-    sparse_arrs = dict()
-
     with np.load(file) as loaded:
         keys = loaded.keys()
         frames = [int(key[3:]) for key in keys if key.startswith("row")]
@@ -53,12 +51,13 @@ def load_sparse(file) -> dict[int, coo_array]:
             raise ValueError("No sparse arrays found in file.")
 
         with Pool() as pool:
-            results = tqdm(
-                pool.imap(_load_frame_data, [(frame, loaded) for frame in frames]),
-                total=len(frames),
-                desc="Loading adjacency arrays",
+            sparse_arrs = dict(
+                tqdm(
+                    pool.map(_load_frame_data, [(frame, loaded) for frame in frames]),
+                    total=len(frames),
+                    desc="Loading adjacency arrays",
+                )
             )
-            sparse_arrs.update(results)
 
     return sparse_arrs
 
