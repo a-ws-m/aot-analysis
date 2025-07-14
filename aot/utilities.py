@@ -1,10 +1,12 @@
 from enum import Enum
+from multiprocessing import Pool
 from pathlib import Path
 from typing import NamedTuple, Union
 
 import MDAnalysis as mda
 import numpy as np
 import yaml
+from tqdm import tqdm
 
 try:
     from scipy.sparse import coo_array
@@ -30,8 +32,18 @@ def save_sparse(sparse_arrs: dict[int, coo_array], file, compressed=True):
         np.savez(file, **arrays_dict)
 
 
+def _load_frame_data(args):
+    """Helper function to load sparse matrix data for a single frame."""
+    frame, loaded = args
+    row = loaded[f"row{frame}"]
+    col = loaded[f"col{frame}"]
+    data = loaded[f"data{frame}"]
+    shape = loaded[f"shape{frame}"]
+    return frame, coo_array((data, (row, col)), shape=shape)
+
+
 def load_sparse(file) -> dict[int, coo_array]:
-    """Load a sparse array from disk."""
+    """Load a sparse array from disk using multiprocessing."""
     sparse_arrs = dict()
 
     with np.load(file) as loaded:
@@ -40,13 +52,13 @@ def load_sparse(file) -> dict[int, coo_array]:
         if not frames:
             raise ValueError("No sparse arrays found in file.")
 
-        for frame in frames:
-            row = loaded[f"row{frame}"]
-            col = loaded[f"col{frame}"]
-            data = loaded[f"data{frame}"]
-            shape = loaded[f"shape{frame}"]
-
-            sparse_arrs[frame] = coo_array((data, (row, col)), shape=shape)
+        with Pool() as pool:
+            results = tqdm(
+                pool.imap(_load_frame_data, [(frame, loaded) for frame in frames]),
+                total=len(frames),
+                desc="Loading adjacency arrays",
+            )
+            sparse_arrs.update(results)
 
     return sparse_arrs
 
@@ -255,4 +267,5 @@ class ResultsYAML:
                     self.coarse_results.append(CoarseResults(**res))
 
     def get_results(self) -> "list[AtomisticResults | CoarseResults]":
+        return self.atomistic_results + self.coarse_results
         return self.atomistic_results + self.coarse_results
