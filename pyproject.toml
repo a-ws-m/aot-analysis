@@ -1,0 +1,30 @@
+[project]
+name = "aot-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Alex Moriarty", email = "amoriarty14@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.10.3",
+    "mdanalysis>=2.9.0",
+    "numpy>=2.2.6",
+    "pandas>=2.3.1",
+    "pytim>=1.0.4",
+    "pyvista>=0.45.2",
+    "pyyaml>=6.0.2",
+    "scikit-learn>=1.7.0",
+    "scipy>=1.15.3",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
+]
+
+[project.scripts]
+aot-cluster = "aot_analysis.plot:main"
+aot-extract = "aot_analysis.scripts.extract_cluster:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

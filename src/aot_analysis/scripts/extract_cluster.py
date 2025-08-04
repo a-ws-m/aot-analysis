@@ -11,7 +11,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import ConvexHull
 
-from aot.cluster import (
+from aot_analysis.cluster import (
     center_on_cluster,
     count_inner_aot,
     count_inside_vesicle,
