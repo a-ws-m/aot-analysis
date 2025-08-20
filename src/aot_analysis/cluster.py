@@ -16,6 +16,8 @@ except ImportError:
 from pathlib import Path
 from typing import Optional
 
+from MDAnalysis.analysis.results import ResultsGroup
+
 try:
     import ase
     from dscribe.descriptors import SOAP
@@ -435,6 +437,12 @@ class MicelleAdjacency(AnalysisBase):
             current_adj_mats if current_adj_mats is not None else dict()
         )
 
+    _analysis_algorithm_is_parallelizable = True
+
+    @classmethod
+    def get_supported_backends(cls):
+        return ("serial", "multiprocessing", "dask")
+
     @cached_property
     def vdwradii(self) -> "dict[str, float]":
         """Determine the van der Waals radii for the atoms in the system."""
@@ -483,28 +491,7 @@ class MicelleAdjacency(AnalysisBase):
 
     def _prepare(self):
         """Initialise the results."""
-        self.frame_counter: list[int] = []
-        self.time_counter: list[int] = []
-        self.agg_nums: list[int] = []
-        self.norm_agg_nums: list[float] = []
-
-        self.volume: list[float] = []
-        self.surface: list[float] = []
-
-        self.total_volume: list[float] = []
-
-        # Coordinate pair eccentricities
-        self.eabs: list[float] = []
-        self.eacs: list[float] = []
-
-        self.radii_of_gyration: list[float] = []
-
-        self.vesicalities: list[float] = []
-
-        # Add storage for new properties
-        self.counterions_inside: list[int] = []
-        self.water_inside: list[int] = []
-        self.inner_aot: list[int] = []
+        self.results = ClusteringResults()
 
         self.soap: Optional[SOAP] = None
         if HAS_DSCRIBE:
@@ -520,8 +507,6 @@ class MicelleAdjacency(AnalysisBase):
                 # weighting={"function": "poly", "r0": r_cut, "m": 1, "c": 1, "w0": 0},
                 average="inner",
             )
-
-        self.soap_vectors: list[np.ndarray] = []
 
     def _single_frame(self):
         """Calculate the contact matrix for the current frame."""
@@ -570,8 +555,8 @@ class MicelleAdjacency(AnalysisBase):
                     self.vdwradii,
                 )
                 if current_idx is None:
-                    self.volume.append(vol)
-                    self.surface.append(surf)
+                    self.results.volume.append(vol)
+                    self.results.surface.append(surf)
                 else:
                     self.df.loc[current_idx, AggregateProperties.VOLUME.value] = vol
                     self.df.loc[current_idx, AggregateProperties.SURFACE_AREA.value] = (
@@ -583,8 +568,8 @@ class MicelleAdjacency(AnalysisBase):
             ):
                 eab, eac = get_cpe(agg_residues.atoms)
                 if current_idx is None:
-                    self.eabs.append(eab)
-                    self.eacs.append(eac)
+                    self.results.eabs.append(eab)
+                    self.results.eacs.append(eac)
                 else:
                     self.df.loc[current_idx, AggregateProperties.EAB.value] = eab
                     self.df.loc[current_idx, AggregateProperties.EAC.value] = eac
@@ -593,7 +578,7 @@ class MicelleAdjacency(AnalysisBase):
                 AggregateProperties.RADIUS_OF_GYRATION, current_agg_entry
             ):
                 if current_idx is None:
-                    self.radii_of_gyration.append(
+                    self.results.radii_of_gyration.append(
                         radius_of_gyration(agg_residues.atoms)
                     )
                 else:
@@ -631,7 +616,7 @@ class MicelleAdjacency(AnalysisBase):
                 )
 
                 if current_idx is None:
-                    self.total_volume.append(total_vol)
+                    self.results.total_volume.append(total_vol)
                 else:
                     self.df.loc[current_idx, AggregateProperties.TOTAL_VOLUME.value] = (
                         total_vol
@@ -641,7 +626,7 @@ class MicelleAdjacency(AnalysisBase):
                 AggregateProperties.AGGREGATION_NUMBERS, current_agg_entry
             ):
                 if current_idx is None:
-                    self.agg_nums.append(agg_num)
+                    self.results.agg_nums.append(agg_num)
                 else:
                     self.df.loc[
                         current_idx, AggregateProperties.AGGREGATION_NUMBERS.value
@@ -652,7 +637,7 @@ class MicelleAdjacency(AnalysisBase):
             ):
                 norm_agg_num = agg_num / self.num_surf
                 if current_idx is None:
-                    self.norm_agg_nums.append(norm_agg_num)
+                    self.results.norm_agg_nums.append(norm_agg_num)
                 else:
                     self.df.loc[
                         current_idx,
@@ -662,7 +647,7 @@ class MicelleAdjacency(AnalysisBase):
             if self.do_calculate(AggregateProperties.VESICALITY, current_agg_entry):
                 vesicality_value = vesicality(agg_residues.atoms & self.tailgroups)
                 if current_idx is None:
-                    self.vesicalities.append(vesicality_value)
+                    self.results.vesicalities.append(vesicality_value)
                 else:
                     self.df.loc[current_idx, AggregateProperties.VESICALITY.value] = (
                         vesicality_value
@@ -675,7 +660,7 @@ class MicelleAdjacency(AnalysisBase):
                     agg_residues, agg_residues.atoms & self.tailgroups, "NA"
                 )
                 if current_idx is None:
-                    self.counterions_inside.append(counterions_count)
+                    self.results.counterions_inside.append(counterions_count)
                 else:
                     self.df.loc[
                         current_idx, AggregateProperties.COUNTERIONS_INSIDE.value
@@ -686,7 +671,7 @@ class MicelleAdjacency(AnalysisBase):
                     agg_residues, agg_residues.atoms & self.tailgroups, "W"
                 )
                 if current_idx is None:
-                    self.water_inside.append(water_count)
+                    self.results.water_inside.append(water_count)
                 else:
                     self.df.loc[current_idx, AggregateProperties.WATER_INSIDE.value] = (
                         water_count
@@ -695,7 +680,7 @@ class MicelleAdjacency(AnalysisBase):
             if self.do_calculate(AggregateProperties.INNER_AOT, current_agg_entry):
                 inner_aot_count = count_inner_aot(agg_residues.atoms & self.tailgroups)
                 if current_idx is None:
-                    self.inner_aot.append(inner_aot_count)
+                    self.results.inner_aot.append(inner_aot_count)
                 else:
                     self.df.loc[current_idx, AggregateProperties.INNER_AOT.value] = (
                         inner_aot_count
@@ -713,39 +698,44 @@ class MicelleAdjacency(AnalysisBase):
                 # Get the average SOAP vector
                 soap_vector = self.soap.create(ase_atoms, n_jobs=-1)
                 if current_idx is None:
-                    self.soap_vectors.append(soap_vector)
+                    self.results.soap_vectors.append(soap_vector)
                 else:
                     self.df.loc[current_idx, AggregateProperties.SOAP_VECTOR.value] = (
                         soap_vector.tostring()
                     )
 
             if current_idx is None:
-                self.frame_counter.append(self._ts.frame)
-                self.time_counter.append(self._ts.time)
+                self.results.frame_counter.append(self._ts.frame)
+                self.results.time_counter.append(self._ts.time)
 
             # TODO: This is why the min_cluster_size must be the same when updating.
             # TODO: This index doesn't keep track of how many aggregates below the threshold were skipped
             agg_idx += 1
 
+    def _get_aggregator(self) -> ResultsGroup:
+        return ResultsGroup(
+            lookup={key: ResultsGroup.flatten_sequence for key in self.results.keys()}
+        )
+
     def _conclude(self):
         """Store results in DataFrame and calculate SOAP KPCA."""
 
         data = {
-            "Frame": self.frame_counter,
-            "Time (ps)": self.time_counter,
-            AggregateProperties.AGGREGATION_NUMBERS.value: self.agg_nums,
-            AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value: self.norm_agg_nums,
-            AggregateProperties.EAB.value: self.eabs,
-            AggregateProperties.EAC.value: self.eacs,
-            AggregateProperties.RADIUS_OF_GYRATION.value: self.radii_of_gyration,
-            AggregateProperties.VOLUME.value: self.volume,
-            AggregateProperties.SURFACE_AREA.value: self.surface,
-            AggregateProperties.TOTAL_VOLUME.value: self.total_volume,
-            AggregateProperties.VESICALITY.value: self.vesicalities,
-            AggregateProperties.COUNTERIONS_INSIDE.value: self.counterions_inside,
-            AggregateProperties.WATER_INSIDE.value: self.water_inside,
-            AggregateProperties.INNER_AOT.value: self.inner_aot,
-            AggregateProperties.SOAP_VECTOR.value: self.soap_vectors,
+            "Frame": self.results.frame_counter,
+            "Time (ps)": self.results.time_counter,
+            AggregateProperties.AGGREGATION_NUMBERS.value: self.results.agg_nums,
+            AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value: self.results.norm_agg_nums,
+            AggregateProperties.EAB.value: self.results.eabs,
+            AggregateProperties.EAC.value: self.results.eacs,
+            AggregateProperties.RADIUS_OF_GYRATION.value: self.results.radii_of_gyration,
+            AggregateProperties.VOLUME.value: self.results.volume,
+            AggregateProperties.SURFACE_AREA.value: self.results.surface,
+            AggregateProperties.TOTAL_VOLUME.value: self.results.total_volume,
+            AggregateProperties.VESICALITY.value: self.results.vesicalities,
+            AggregateProperties.COUNTERIONS_INSIDE.value: self.results.counterions_inside,
+            AggregateProperties.WATER_INSIDE.value: self.results.water_inside,
+            AggregateProperties.INNER_AOT.value: self.results.inner_aot,
+            AggregateProperties.SOAP_VECTOR.value: self.results.soap_vectors,
         }
         data = {key: val for key, val in data.items() if len(val)}
 
@@ -798,6 +788,7 @@ def all_atomistic_ma(
     current_df: Optional[pd.DataFrame] = None,
     current_adj_mats: Optional[dict[int, coo_array]] = None,
     end: Optional[int] = None,
+    num_workers: int = 1,
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = result.universe()
@@ -815,7 +806,7 @@ def all_atomistic_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step, stop=end)
+    ma.run(step=step, stop=end, n_workers=num_workers, backend="dask")
 
     return ma
 
@@ -828,6 +819,7 @@ def coarse_ma(
     current_df: Optional[pd.DataFrame] = None,
     current_adj_mats: Optional[dict[int, coo_array]] = None,
     end: Optional[int] = None,
+    num_workers: int = 1,
 ) -> MicelleAdjacency:
     """Run a micelle adjacency analysis for the default tail group indices."""
     u = result.universe()
@@ -843,7 +835,7 @@ def coarse_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step, stop=end)
+    ma.run(step=step, stop=end, n_workers=num_workers, backend="dask")
 
     return ma
 
@@ -857,6 +849,7 @@ def batch_ma_analysis(
     overwrite: bool = False,
     properties: "set[AggregateProperties]" = AggregateProperties.fast(),
     end: Optional[int] = None,
+    num_workers: int = 1,
 ) -> pd.DataFrame:
     """Load MA results from disk or run analyses anew."""
     plot_df = pd.DataFrame()
@@ -891,6 +884,7 @@ def batch_ma_analysis(
                 current_df=this_df,
                 current_adj_mats=current_adj_mats,
                 end=end,
+                num_workers=num_workers
             )
         else:
             ma = all_atomistic_ma(
@@ -901,6 +895,7 @@ def batch_ma_analysis(
                 current_df=this_df,
                 current_adj_mats=current_adj_mats,
                 end=end,
+                num_workers=num_workers
             )
         ma.save(adj_path, df_path)
 

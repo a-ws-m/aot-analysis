@@ -7,6 +7,7 @@ import MDAnalysis as mda
 import numpy as np
 import yaml
 from tqdm import tqdm
+from MDAnalysis.analysis.results import Results
 
 try:
     from scipy.sparse import coo_array
@@ -104,6 +105,7 @@ class AggregateProperties(Enum):
                 cls.COUNTERIONS_INSIDE,
                 cls.WATER_INSIDE,
                 cls.INNER_AOT,
+                cls.VESICALITY,
             }
         )
 
@@ -267,4 +269,34 @@ class ResultsYAML:
 
     def get_results(self) -> "list[AtomisticResults | CoarseResults]":
         return self.atomistic_results + self.coarse_results
-        return self.atomistic_results + self.coarse_results
+
+class ClusteringResults(Results):
+    """Store results from a clustering analysis."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.frame_counter: list[int] = []
+        self.time_counter: list[int] = []
+        self.agg_nums: list[int] = []
+        self.norm_agg_nums: list[float] = []
+
+        self.volume: list[float] = []
+        self.surface: list[float] = []
+
+        self.total_volume: list[float] = []
+
+        # Coordinate pair eccentricities
+        self.eabs: list[float] = []
+        self.eacs: list[float] = []
+
+        self.radii_of_gyration: list[float] = []
+
+        self.vesicalities: list[float] = []
+
+        # Add storage for new properties
+        self.counterions_inside: list[int] = []
+        self.water_inside: list[int] = []
+        self.inner_aot: list[int] = []
+
+        self.soap_vectors: list[np.ndarray] = []

@@ -657,6 +657,12 @@ def main():
         action="store_true",
         help="Force the program to skip the calculation step.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Number of workers to use for the calculations. Default is 1 (no parallelisation).",
+    )
     plot_options = parser.add_argument_group("Plot types")
     plot_options.add_argument(
         "--clustering",
@@ -780,6 +786,7 @@ def main():
             overwrite=args.overwrite,
             properties=properties,
             end=end,
+            num_workers=args.num_workers,
         )
 
     if args.clustering:

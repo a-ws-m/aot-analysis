@@ -21,6 +21,7 @@ name = "aot-analysis"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dask" },
     { name = "matplotlib" },
     { name = "mdanalysis" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -38,6 +39,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dask", specifier = ">=2025.7.0" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "mdanalysis", specifier = ">=2.9.0" },
     { name = "numpy", specifier = ">=2.2.6" },

@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
+    "dask>=2025.7.0",
     "matplotlib>=3.10.3",
     "mdanalysis>=2.9.0",
     "numpy>=2.2.6",
