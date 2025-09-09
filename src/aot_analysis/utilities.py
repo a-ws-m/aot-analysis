@@ -6,8 +6,8 @@ from typing import NamedTuple, Union
 import MDAnalysis as mda
 import numpy as np
 import yaml
-from tqdm import tqdm
 from MDAnalysis.analysis.results import Results
+from tqdm import tqdm
 
 try:
     from scipy.sparse import coo_array
@@ -270,6 +270,7 @@ class ResultsYAML:
     def get_results(self) -> "list[AtomisticResults | CoarseResults]":
         return self.atomistic_results + self.coarse_results
 
+
 class ClusteringResults(Results):
     """Store results from a clustering analysis."""
 
@@ -300,3 +301,24 @@ class ClusteringResults(Results):
         self.inner_aot: list[int] = []
 
         self.soap_vectors: list[np.ndarray] = []
+
+    @property
+    def computed(self) -> list[str]:
+        """Get the computed properties."""
+        return [
+            "frame_counter",
+            "time_counter",
+            "agg_nums",
+            "norm_agg_nums",
+            "volume",
+            "surface",
+            "total_volume",
+            "eabs",
+            "eacs",
+            "radii_of_gyration",
+            "vesicalities",
+            "counterions_inside",
+            "water_inside",
+            "inner_aot",
+            "soap_vectors",
+        ]
