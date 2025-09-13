@@ -806,7 +806,12 @@ def all_atomistic_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step, stop=end, n_workers=num_workers, backend="dask")
+    ma.run(
+        step=step,
+        stop=end,
+        n_workers=num_workers,
+        backend="dask" if num_workers > 1 else "serial",
+    )
 
     return ma
 
@@ -835,7 +840,12 @@ def coarse_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step, stop=end, n_workers=num_workers, backend="dask")
+    ma.run(
+        step=step,
+        stop=end,
+        n_workers=num_workers,
+        backend="dask" if num_workers > 1 else "serial",
+    )
 
     return ma
 
