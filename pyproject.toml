@@ -25,6 +25,7 @@ dependencies = [
 [project.scripts]
 aot-cluster = "aot_analysis.plot:main"
 aot-extract = "aot_analysis.scripts.extract_cluster:main"
+aot-msd = "aot_analysis.msd:main"
 
 [build-system]
 requires = ["hatchling"]
