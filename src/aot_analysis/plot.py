@@ -591,7 +591,7 @@ def plot_vesicle_contents(
 
 def main():
     """Commandline interface for program."""
-    sns.set_theme(context="paper", palette="colorblind")
+    sns.set_theme(context="talk", palette="colorblind")
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
