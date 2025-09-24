@@ -47,6 +47,7 @@ def load_results_datasets(
             else result.coarseness.friendly_name
         )
 
+
         plot_df = pd.concat([plot_df, this_df], ignore_index=True)
 
     if end_time is not None:
@@ -59,6 +60,13 @@ def load_results_datasets(
     plot_df["Norm. agg. number"] = plot_df[
         AggregateProperties.NORMALISED_AGGREGATION_NUMBERS.value
     ]
+
+    rename_map = {
+        "Radius of gyration (Å)": AggregateProperties.RADIUS_OF_GYRATION.value,
+        "Volume (Å)": AggregateProperties.VOLUME.value,
+        "Surface area (Å)": AggregateProperties.SURFACE_AREA.value,
+    }
+    plot_df.rename(columns=rename_map, inplace=True)
 
     print(plot_df.head())
 
@@ -591,7 +599,7 @@ def plot_vesicle_contents(
 
 def main():
     """Commandline interface for program."""
-    sns.set_theme(context="paper", palette="colorblind")
+    sns.set_theme(context="talk", palette="colorblind")
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -729,6 +737,11 @@ def main():
         action="store_true",
         help="Disable the use of intervals when plotting. This will plot every frame.",
     )
+    plot_options.add_argument(
+        "--no-vesicality",
+        action="store_true",
+        help="Disable using the vesicality as the hue for aggregation number plots."
+    )
 
     args = parser.parse_args()
 
@@ -805,7 +818,7 @@ def main():
             "Normalised aggregation numbers",
             # ylim=(0, 1.01),
             use_interval=not args.disable_interval,
-            hue=AggregateProperties.VESICALITY.value,
+            hue=AggregateProperties.VESICALITY.value if not args.no_vesicality else "Norm. agg. number",
             hue_norm=(0, 1),
             end=end,
             end_time=end_time,
