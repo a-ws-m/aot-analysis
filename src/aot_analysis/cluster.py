@@ -437,6 +437,8 @@ class MicelleAdjacency(AnalysisBase):
             current_adj_mats if current_adj_mats is not None else dict()
         )
 
+        self.results = ClusteringResults()
+
     _analysis_algorithm_is_parallelizable = True
 
     @classmethod
@@ -467,7 +469,7 @@ class MicelleAdjacency(AnalysisBase):
             return pytim_data.vdwradii(CHARMM27_TOP)
 
     @cached_property
-    def atom_map(self) -> set[str]:
+    def atom_map(self) -> dict[str, int]:
         """Get a canonical map from atom types to integers."""
         atom_types = set(atom.type[0] for atom in self.whole_molecules.atoms)
         return {atom: idx + 1 for idx, atom in enumerate(sorted(atom_types))}
@@ -490,9 +492,7 @@ class MicelleAdjacency(AnalysisBase):
         return in_properties_to_calc and not_in_entry
 
     def _prepare(self):
-        """Initialise the results."""
-        self.results = ClusteringResults()
-
+        """Initialise the soap parameteriser."""
         self.soap: Optional[SOAP] = None
         if HAS_DSCRIBE:
             r_cut = 3 * self.cutoff
@@ -714,7 +714,7 @@ class MicelleAdjacency(AnalysisBase):
 
     def _get_aggregator(self) -> ResultsGroup:
         return ResultsGroup(
-            lookup={key: ResultsGroup.flatten_sequence for key in self.results.keys()}
+            lookup={key: ResultsGroup.flatten_sequence for key in self.results.computed}
         )
 
     def _conclude(self):
@@ -806,7 +806,12 @@ def all_atomistic_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step, stop=end, n_workers=num_workers, backend="dask")
+    ma.run(
+        step=step,
+        stop=end,
+        n_workers=num_workers,
+        backend="dask" if num_workers > 1 else "serial",
+    )
 
     return ma
 
@@ -835,7 +840,12 @@ def coarse_ma(
         current_df=current_df,
         current_adj_mats=current_adj_mats,
     )
-    ma.run(step=step, stop=end, n_workers=num_workers, backend="dask")
+    ma.run(
+        step=step,
+        stop=end,
+        n_workers=num_workers,
+        backend="dask" if num_workers > 1 else "serial",
+    )
 
     return ma
 
@@ -884,7 +894,7 @@ def batch_ma_analysis(
                 current_df=this_df,
                 current_adj_mats=current_adj_mats,
                 end=end,
-                num_workers=num_workers
+                num_workers=num_workers,
             )
         else:
             ma = all_atomistic_ma(
@@ -895,7 +905,7 @@ def batch_ma_analysis(
                 current_df=this_df,
                 current_adj_mats=current_adj_mats,
                 end=end,
-                num_workers=num_workers
+                num_workers=num_workers,
             )
         ma.save(adj_path, df_path)
 
