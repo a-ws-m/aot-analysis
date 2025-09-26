@@ -1349,9 +1349,9 @@ def plot_hydrodynamic_radius_analysis(
                 label="Data",
             )
 
-            # Fit Stokes-Einstein relationship: D = k_BT/(6πηR_H)
-            # Rearrange to: D*R_H = k_BT/(6πη) = constant
-            # We'll fit D as a function of 1/R_H using LinearRegression
+            # Fit modified Stokes-Einstein relationship: D = A * R_H^n
+            # Using log-linear fitting: log(D) = log(A) + n * log(R_H)
+            # This allows the exponent n to vary from the classical -1
             if len(merged_df) >= 3:  # Need at least 3 points for fitting
                 try:
                     rh_values = np.array(merged_df["hydrodynamic_radius_avg"])  # Å
@@ -1369,63 +1369,98 @@ def plot_hydrodynamic_radius_analysis(
                         rh_fit_m = rh_values_m[valid_mask]
                         d_fit_si = d_values_si[valid_mask]
 
-                        # Use LinearRegression to fit D = (k_BT/(6πη)) * (1/R_H)
-                        # X = 1/R_H, y = D
-                        X = (1.0 / rh_fit_m).reshape(-1, 1)  # Shape (n_samples, 1)
-                        y = d_fit_si
+                        # Log-linear regression: log(D) = log(A) + n * log(R_H)
+                        X = np.log(rh_fit_m).reshape(-1, 1)  # log(R_H)
+                        y = np.log(d_fit_si)  # log(D)
 
-                        # Fit the linear model
-                        regressor = LinearRegression(fit_intercept=False)
+                        # Fit the linear model in log space
+                        regressor = LinearRegression(fit_intercept=True)
                         regressor.fit(X, y)
 
-                        # Get the slope and intercept
-                        slope = regressor.coef_[0]  # This is k_BT/(6πη)
-                        intercept = 0.0  # Since we forced intercept to zero
+                        # Get the slope (exponent) and intercept
+                        exponent = regressor.coef_[0]  # This is n in D = A * R_H^n
+                        log_A = regressor.intercept_  # This is log(A)
+                        A = np.exp(log_A)  # Convert back to linear scale
 
-                        # Calculate effective viscosity from the slope
-                        eta_fitted = k_B * temperature / (6 * np.pi * slope)
+                        # Calculate R² score in log space
+                        y_pred_log = regressor.predict(X)
+                        r_squared = r2_score(y, y_pred_log)
 
-                        # Calculate R² score
-                        y_pred = regressor.predict(X)
-                        r_squared = r2_score(y, y_pred)
-
-                        # Calculate standard error of the slope for uncertainty estimation
-                        residuals = y - y_pred
+                        # Calculate standard errors
+                        residuals = y - y_pred_log
                         mse = np.mean(residuals**2)
                         X_centered = X - np.mean(X)
-                        slope_variance = mse / np.sum(X_centered**2)
-                        slope_std_err = np.sqrt(slope_variance)
+                        exponent_variance = mse / np.sum(X_centered**2)
+                        exponent_std_err = np.sqrt(exponent_variance)
 
-                        # Propagate uncertainty to viscosity
-                        eta_std_err = (
-                            k_B * temperature * slope_std_err / (6 * np.pi * slope**2)
+                        # Standard error for log_A (intercept)
+                        n_points = len(X)
+                        log_A_variance = mse * (
+                            1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2)
                         )
+                        log_A_std_err = np.sqrt(log_A_variance)
+
+                        # Propagate uncertainty to A
+                        A_std_err = A * log_A_std_err
+
+                        # Calculate effective viscosity even with modified exponent
+                        # For classical Stokes-Einstein: D = k_BT/(6πηR_H), so A = k_BT/(6πη)
+                        # Even if exponent ≠ -1, we can still estimate an "effective" viscosity
+                        # using the fitted A value at some reference radius
+                        if abs(exponent + 1) < 0.1:  # Close to classical exponent
+                            eta_fitted = k_B * temperature / (6 * np.pi * A)
+                            eta_std_err = (
+                                k_B * temperature * A_std_err / (6 * np.pi * A**2)
+                            )
+                        else:
+                            # For non-classical exponent, calculate effective viscosity
+                            # at the geometric mean of the radii
+                            ref_radius = np.exp(np.mean(np.log(rh_fit_m)))
+                            eta_fitted = (
+                                k_B
+                                * temperature
+                                / (6 * np.pi * A * ref_radius ** (exponent + 1))
+                            )
+                            # Uncertainty propagation is more complex for non-classical case
+                            eta_std_err = eta_fitted * np.sqrt(
+                                (A_std_err / A) ** 2
+                                + (
+                                    (exponent + 1)
+                                    * exponent_std_err
+                                    * np.log(ref_radius)
+                                )
+                                ** 2
+                            )
 
                         # Generate theoretical curve using fitted parameters
                         rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
                         rh_range_m = rh_range * 1e-10  # Convert to m
-                        X_range = (1.0 / rh_range_m).reshape(-1, 1)
-                        d_theory_si = regressor.predict(X_range)
+                        d_theory_si = A * (rh_range_m**exponent)
 
                         plt.plot(
                             rh_range,
                             d_theory_si,
                             "r-",
                             linewidth=2,
-                            label=f"Stokes-Einstein fit: η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s",
+                            label=f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s",
                         )
 
+                        print(f"Modified Stokes-Einstein fit results:")
+                        print(f"  Exponent n: {exponent:.3f} ± {exponent_std_err:.3f}")
                         print(
-                            f"Effective viscosity from Stokes-Einstein LinearRegression fit:"
+                            f"  Prefactor A: {A:.2e} ± {A_std_err:.2e} m^({2-exponent})/s"
                         )
                         print(
-                            f"  η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                            f"  Effective viscosity η: {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
                         )
-                        print(f"  η = {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
+                        print(f"  η: {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
                         print(f"  Temperature: {temperature:.1f} K")
-                        print(f"  Slope: {slope:.2e} m³/s")
-                        print(f"  Intercept: {intercept:.2e} m²/s")
                         print(f"  R² = {r_squared:.3f}")
+                        if abs(exponent + 1) > 0.1:
+                            ref_radius_ang = np.exp(np.mean(np.log(rh_fit)))
+                            print(
+                                f"  (Viscosity calculated at reference radius: {ref_radius_ang:.1f} Å)"
+                            )
 
                 except Exception as e:
                     print(f"Warning: Could not fit Stokes-Einstein relationship: {e}")
