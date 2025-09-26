@@ -22,6 +22,16 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from tqdm import tqdm
 
+try:
+    import jax.numpy as jnp
+    from jax import jit
+
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+
+from scipy.spatial.distance import pdist, squareform
+
 from .cluster import get_adj_array
 
 TIMESCALE_CUTOFF = 2500  # ps
@@ -316,6 +326,150 @@ def hypersphere_center_of_mass(
     true_com = np.mod(true_com, box_dimensions)
 
     return true_com
+
+
+def calculate_hydrodynamic_radius(
+    positions: np.ndarray,
+    box_dimensions: np.ndarray,
+) -> float:
+    """Calculate hydrodynamic radius for a set of particles with PBC handling.
+
+    Uses the formula: <R_H^-1> = (1/N^2) * sum_{n,m} <1/|r_n - r_m|>
+    R_H = 1 / <R_H^-1>
+
+    Uses JAX for efficient pairwise distance calculations when available,
+    falls back to NumPy implementation otherwise.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Shape (N, 3) array of particle positions
+    box_dimensions : np.ndarray
+        Shape (3,) array of box dimensions
+
+    Returns
+    -------
+    float
+        Hydrodynamic radius in same units as positions
+    """
+    N = len(positions)
+    if N < 2:
+        return 0.0
+
+    if JAX_AVAILABLE and N > 10:  # Use JAX for larger systems where it's more efficient
+        return _calculate_hydrodynamic_radius_jax(positions, box_dimensions)
+    else:
+        return _calculate_hydrodynamic_radius_numpy(positions, box_dimensions)
+
+
+if JAX_AVAILABLE:
+
+    @jit
+    def _compute_rh(positions, box_dimensions):
+        N = len(positions)
+
+        # Convert to JAX arrays
+        pos_jax = jnp.array(positions)
+        box_jax = jnp.array(box_dimensions)
+
+        # Manually calculate all pairwise distances
+        # Create indices for all pairs (i, j) where i != j
+        i_indices, j_indices = jnp.meshgrid(jnp.arange(N), jnp.arange(N), indexing="ij")
+
+        # Create mask to exclude self-interactions
+        mask = i_indices != j_indices
+
+        # Vectorized pairwise distance calculation
+        # Expand dimensions for broadcasting
+        pos_i = pos_jax[i_indices]  # Shape: (N, N, 3)
+        pos_j = pos_jax[j_indices]  # Shape: (N, N, 3)
+
+        # Calculate displacement vectors
+        displacements = pos_i - pos_j  # Shape: (N, N, 3)
+
+        # Apply PBC to all displacements at once
+        displacements -= jnp.round(displacements / box_jax) * box_jax
+
+        # Calculate distances
+        distances = jnp.sqrt(jnp.sum(displacements**2, axis=2))  # Shape: (N, N)
+
+        # Apply mask to exclude self-interactions and very small distances
+        valid_mask = mask & (distances > 1e-6)
+
+        # Calculate inverse distances where mask is True, 0 elsewhere
+        inverse_distances = jnp.where(valid_mask, 1.0 / distances, 0.0)
+
+        # Sum all inverse distances
+        inverse_r_sum = jnp.sum(inverse_distances)
+
+        # Calculate average inverse distance
+        avg_inverse_r = inverse_r_sum / (N * N)
+
+        # Return hydrodynamic radius
+        return 1.0 / avg_inverse_r
+
+
+def _calculate_hydrodynamic_radius_jax(
+    positions: np.ndarray,
+    box_dimensions: np.ndarray,
+) -> float:
+    """JAX-optimized hydrodynamic radius calculation using manual pairwise distances."""
+    if not JAX_AVAILABLE:
+        raise ImportError("JAX is not available")
+
+    rh = _compute_rh(positions, box_dimensions)
+    return rh if not jnp.isnan(rh) else 0.0
+
+
+def _calculate_hydrodynamic_radius_numpy(
+    positions: np.ndarray,
+    box_dimensions: np.ndarray,
+) -> float:
+    """SciPy pdist-based implementation for hydrodynamic radius calculation."""
+
+    N = len(positions)
+
+    # For PBC, we need to handle the minimum image convention
+    # Since pdist doesn't handle PBC directly, we'll apply PBC corrections
+    # to the positions first, then use pdist
+
+    def pbc_distance_metric(u, v):
+        """Custom distance metric that handles periodic boundary conditions."""
+        displacement = u - v
+        # Apply minimum image convention
+        displacement = np.where(
+            displacement > box_dimensions / 2,
+            displacement - box_dimensions,
+            displacement,
+        )
+        displacement = np.where(
+            displacement < -box_dimensions / 2,
+            displacement + box_dimensions,
+            displacement,
+        )
+        return np.sqrt(np.sum(displacement**2))
+
+    # Use pdist with custom PBC distance metric
+    # pdist returns condensed distance matrix (upper triangle only)
+    distances_condensed = pdist(positions, metric=pbc_distance_metric)
+
+    # Convert to full square matrix
+    distances_full = squareform(distances_condensed)
+
+    # Create mask to exclude self-interactions and very small distances
+    mask = (distances_full > 1e-6) & (np.arange(N)[:, None] != np.arange(N)[None, :])
+
+    # Calculate inverse distances where mask is True, 0 elsewhere
+    inverse_distances = np.where(mask, 1.0 / distances_full, 0.0)
+
+    # Sum all inverse distances
+    inverse_r_sum = np.sum(inverse_distances)
+
+    # Calculate average inverse distance
+    avg_inverse_r = inverse_r_sum / (N * N)
+
+    # Return hydrodynamic radius
+    return 1.0 / avg_inverse_r if avg_inverse_r > 0 else 0.0
 
 
 def calculate_radius_of_gyration(
@@ -616,14 +770,14 @@ def calculate_aggregate_sd(
     return pd.DataFrame(sd_data)
 
 
-def calculate_aggregate_radius_of_gyration(
+def calculate_aggregate_hydrodynamic_radius(
     trajectory_path: str,
     structure_path: str,
     lifetime_df: pd.DataFrame,
     tail_selection: str = "name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Calculate average radius of gyration for aggregates by size.
+    """Calculate average hydrodynamic radius for aggregates by size.
 
     Parameters
     ----------
@@ -641,7 +795,7 @@ def calculate_aggregate_radius_of_gyration(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: aggregation_number, radius_of_gyration_avg, radius_of_gyration_std, n_aggregates
+        DataFrame with columns: aggregation_number, hydrodynamic_radius_avg, hydrodynamic_radius_std, n_aggregates
     """
     # Load trajectory
     u = mda.Universe(structure_path, trajectory_path)
@@ -652,11 +806,11 @@ def calculate_aggregate_radius_of_gyration(
     for i, residue in enumerate(tailgroups.residues.unique):
         residue_mapping[i] = residue
 
-    # Store radius of gyration data by aggregation number
-    rg_by_size = defaultdict(list)
+    # Store hydrodynamic radius data by aggregation number
+    rh_by_size = defaultdict(list)
 
     if verbose:
-        print(f"Calculating radius of gyration for {len(lifetime_df)} aggregates...")
+        print(f"Calculating hydrodynamic radius for {len(lifetime_df)} aggregates...")
 
     if len(lifetime_df) == 0:
         if verbose:
@@ -666,7 +820,7 @@ def calculate_aggregate_radius_of_gyration(
     # Process each unique aggregate
     for idx, (molecules_tuple, start_frame) in tqdm(
         enumerate(lifetime_df.index),
-        desc="Processing aggregate radius of gyration",
+        desc="Processing aggregate hydrodynamic radius",
         total=len(lifetime_df.index),
     ):
         agg_data = lifetime_df.loc[(molecules_tuple, start_frame)]
@@ -698,49 +852,43 @@ def calculate_aggregate_radius_of_gyration(
         for residue in agg_residues[1:]:
             agg_atoms += residue.atoms
 
-        # Calculate radius of gyration at multiple time points during aggregate's lifetime
-        rg_values = []
+        # We'll use all atom positions for hydrodynamic radius calculation
+        rh_values = []
 
         # Sample frames throughout the aggregate's lifetime
         total_frames = end_frame_val - start_frame_val + 1
-        # Sample every 10 frames or at least 5 frames, but don't exceed total frames
-        sample_interval = max(1, min(10, total_frames // 5))
+        # Sample every 500 frames or at least 5 frames, but don't exceed total frames
+        sample_interval = max(1, total_frames // 5)
         sample_frames = range(start_frame_val, end_frame_val + 1, sample_interval)
 
         for frame_idx in sample_frames:
             u.trajectory[frame_idx]
 
-            # Calculate center of mass using improved hypersphere method with masses
-            com = hypersphere_center_of_mass(
-                agg_atoms.positions, u.dimensions[:3], agg_atoms.masses
-            )
+            # Calculate hydrodynamic radius using all atom positions in the aggregate
+            rh = calculate_hydrodynamic_radius(agg_atoms.positions, u.dimensions[:3])
 
-            # Calculate radius of gyration
-            rg = calculate_radius_of_gyration(
-                agg_atoms.positions, u.dimensions[:3], agg_atoms.masses, com
-            )
+            if rh > 0:  # Only add valid values
+                rh_values.append(rh)
 
-            rg_values.append(rg)
-
-        if rg_values:  # Only add if we have valid Rg values
-            # Calculate average radius of gyration for this aggregate
-            avg_rg = np.mean(rg_values)
-            rg_by_size[agg_size].append(avg_rg)
+        if rh_values:  # Only add if we have valid Rh values
+            # Calculate average hydrodynamic radius for this aggregate
+            avg_rh = np.mean(rh_values)
+            rh_by_size[agg_size].append(avg_rh)
 
     # Create summary DataFrame
-    rg_summary_data = []
-    for agg_size, rg_values in rg_by_size.items():
-        if rg_values:
-            rg_summary_data.append(
+    rh_summary_data = []
+    for agg_size, rh_values in rh_by_size.items():
+        if rh_values:
+            rh_summary_data.append(
                 {
                     "aggregation_number": agg_size,
-                    "radius_of_gyration_avg": np.mean(rg_values),
-                    "radius_of_gyration_std": np.std(rg_values),
-                    "n_aggregates": len(rg_values),
+                    "hydrodynamic_radius_avg": np.mean(rh_values),
+                    "hydrodynamic_radius_std": np.std(rh_values),
+                    "n_aggregates": len(rh_values),
                 }
             )
 
-    return pd.DataFrame(rg_summary_data)
+    return pd.DataFrame(rh_summary_data)
 
 
 def estimate_diffusion_coefficients(
@@ -1115,63 +1263,66 @@ def plot_sd_analysis(
         print("- Aggregates too short-lived for meaningful MSD calculation")
 
 
-def plot_radius_of_gyration_analysis(
-    rg_df: pd.DataFrame,
+def plot_hydrodynamic_radius_analysis(
+    rh_df: pd.DataFrame,
     diffusion_df: Optional[pd.DataFrame] = None,
     output_dir: str = ".",
     show_plots: bool = True,
-    rg_exponent: float = 2.0,
+    temperature: float = 298.15,  # K
 ):
-    """Create plots for radius of gyration analysis.
+    """Create plots for hydrodynamic radius analysis and calculate effective viscosity.
 
     Parameters
     ----------
-    rg_df : pd.DataFrame
-        Radius of gyration data from calculate_aggregate_radius_of_gyration
+    rh_df : pd.DataFrame
+        Hydrodynamic radius data from calculate_aggregate_hydrodynamic_radius
     diffusion_df : pd.DataFrame, optional
         Diffusion coefficient data from estimate_diffusion_coefficients
     output_dir : str
         Directory to save plots
     show_plots : bool
         Whether to display plots
-    rg_exponent : float, default=3.0
-        Exponent for the inverse relationship fit: D = a + b * Rg^(-exponent)
+    temperature : float, default=298.15
+        Temperature in Kelvin for viscosity calculation
     """
     # Set up the plotting style
     plt.style.use("default")
     sns.set_palette("husl")
 
-    # Plot 1: Radius of gyration vs aggregation number
-    if len(rg_df) > 0:
+    # Constants for viscosity calculation
+    k_B = 1.380649e-23  # Boltzmann constant in J/K
+
+    # Plot 1: Hydrodynamic radius vs aggregation number
+    if len(rh_df) > 0:
         plt.figure(figsize=(8, 6))
 
         plt.errorbar(
-            rg_df["aggregation_number"],
-            rg_df["radius_of_gyration_avg"],
-            yerr=rg_df["radius_of_gyration_std"],
+            rh_df["aggregation_number"],
+            rh_df["hydrodynamic_radius_avg"],
+            yerr=rh_df["hydrodynamic_radius_std"],
             fmt="o-",
             capsize=5,
             capthick=2,
             alpha=0.8,
-            label="Radius of gyration",
+            label="Hydrodynamic radius",
         )
 
         plt.xlabel("Aggregation Number")
-        plt.ylabel("Radius of Gyration (Å)")
-        plt.title("Radius of Gyration vs Aggregate Size")
+        plt.ylabel("Hydrodynamic Radius (Å)")
+        plt.title("Hydrodynamic Radius vs Aggregate Size")
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
 
         if output_dir:
-            plt.savefig(f"{output_dir}/rog_vs_size.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"{output_dir}/rh_vs_size.png", dpi=300, bbox_inches="tight")
         if show_plots:
             plt.show()
 
-    # Plot 2: Diffusion coefficient vs radius of gyration with inverse power fit
-    if diffusion_df is not None and len(diffusion_df) > 0 and len(rg_df) > 0:
+    # Plot 2: Diffusion coefficient vs hydrodynamic radius with Stokes-Einstein fit
+    if diffusion_df is not None and len(diffusion_df) > 0 and len(rh_df) > 0:
         # Merge the dataframes on aggregation number
-        merged_df = pd.merge(diffusion_df, rg_df, on="aggregation_number", how="inner")
+        merged_df = pd.merge(diffusion_df, rh_df, on="aggregation_number", how="inner")
 
         if len(merged_df) > 0:
             plt.figure(figsize=(10, 6))
@@ -1182,11 +1333,14 @@ def plot_radius_of_gyration_analysis(
             )  # Å²/ps to m²/s
             diffusion_error_si = merged_df["diffusion_error"] * 1e-8  # Å²/ps to m²/s
 
+            # Convert hydrodynamic radius to meters for viscosity calculation
+            rh_m = merged_df["hydrodynamic_radius_avg"] * 1e-10  # Å to m
+
             # Plot data points with error bars
             plt.errorbar(
-                merged_df["radius_of_gyration_avg"],
+                merged_df["hydrodynamic_radius_avg"],
                 diffusion_coeff_si,
-                xerr=merged_df["radius_of_gyration_std"],
+                xerr=merged_df["hydrodynamic_radius_std"],
                 yerr=diffusion_error_si,
                 fmt="o",
                 capsize=5,
@@ -1195,73 +1349,67 @@ def plot_radius_of_gyration_analysis(
                 label="Data",
             )
 
-            # Fit inverse power relationship: D = a + b * Rg^(-exponent)
-            # Use OLS regression with transformed variables
+            # Fit Stokes-Einstein relationship: D = k_BT/(6πηR_H)
+            # Rearrange to: η = k_BT/(6πD*R_H)
             if len(merged_df) >= 3:  # Need at least 3 points for fitting
                 try:
-                    rg_values = np.array(merged_df["radius_of_gyration_avg"])
-                    d_values = np.array(
-                        merged_df["diffusion_coefficient"]
-                    )  # Keep in Å²/ps for fitting
+                    rh_values = np.array(merged_df["hydrodynamic_radius_avg"])  # Å
+                    d_values = np.array(merged_df["diffusion_coefficient"])  # Å²/ps
+
+                    # Convert to SI units for viscosity calculation
+                    rh_values_m = rh_values * 1e-10  # Å to m
+                    d_values_si = d_values * 1e-8  # Å²/ps to m²/s
 
                     # Filter out any non-positive values
-                    valid_mask = (rg_values > 0) & (d_values > 0)
+                    valid_mask = (rh_values > 0) & (d_values > 0)
                     if np.sum(valid_mask) >= 3:
-                        rg_fit = rg_values[valid_mask]
+                        rh_fit = rh_values[valid_mask]
                         d_fit = d_values[valid_mask]
+                        rh_fit_m = rh_values_m[valid_mask]
+                        d_fit_si = d_values_si[valid_mask]
 
-                        # Create feature matrix: X = [1, Rg^(-exponent)]
-                        rg_inv_power = rg_fit ** (-rg_exponent)
-                        X = np.column_stack([np.ones(len(rg_fit)), rg_inv_power])
-
-                        # Fit using OLS: D = a + b * Rg^(-exponent)
-                        model = LinearRegression()
-                        model.fit(X, d_fit)
-
-                        # Get coefficients
-                        a, b = model.intercept_, model.coef_[1]
-
-                        # Calculate predictions and R-squared
-                        d_pred = model.predict(X)
-                        r_squared = r2_score(d_fit, d_pred)
-
-                        # Generate fitted curve for plotting
-                        rg_range = np.linspace(rg_fit.min(), rg_fit.max(), 100)
-                        rg_inv_power_range = rg_range ** (-rg_exponent)
-                        X_range = np.column_stack(
-                            [np.ones(len(rg_range)), rg_inv_power_range]
+                        # Calculate effective viscosity for each point
+                        eta_values = (
+                            k_B * temperature / (6 * np.pi * d_fit_si * rh_fit_m)
                         )
-                        d_fitted = model.predict(X_range)
-                        d_fitted_si = d_fitted * 1e-8  # Convert to m²/s for plotting
 
-                        # Format exponent for display
-                        exp_str = (
-                            f"{rg_exponent:g}"  # Use :g to avoid unnecessary decimals
+                        # Calculate average effective viscosity
+                        eta_avg = np.mean(eta_values)
+                        eta_std = np.std(eta_values)
+
+                        # Generate theoretical curve using average viscosity
+                        rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
+                        rh_range_m = rh_range * 1e-10  # Convert to m
+                        d_theory_si = (
+                            k_B * temperature / (6 * np.pi * eta_avg * rh_range_m)
                         )
 
                         plt.plot(
-                            rg_range,
-                            d_fitted_si,
+                            rh_range,
+                            d_theory_si,
                             "r-",
                             linewidth=2,
-                            label=f"Fit: D = {a*1e-8:.2e} + {b*1e-8:.2e}/Rg$^{{{exp_str}}}$ (R² = {r_squared:.3f})",
+                            label=f"Stokes-Einstein: η = {eta_avg*1000:.2f} ± {eta_std*1000:.2f} mPa·s",
                         )
 
-                        print(
-                            f"Inverse power relationship fit (exponent = {rg_exponent}):"
+                        print(f"Effective viscosity from Stokes-Einstein relation:")
+                        print(f"  η = {eta_avg*1000:.2f} ± {eta_std*1000:.2f} mPa·s")
+                        print(f"  η = {eta_avg:.2e} ± {eta_std:.2e} Pa·s")
+                        print(f"  Temperature: {temperature:.1f} K")
+
+                        # Calculate R² for the fit
+                        d_theory_fit_si = (
+                            k_B * temperature / (6 * np.pi * eta_avg * rh_fit_m)
                         )
-                        print(f"  D = {a:.2e} + {b:.2e} * Rg^(-{rg_exponent}) (Å²/ps)")
-                        print(
-                            f"  D = {a*1e-8:.2e} + {b*1e-8:.2e} * Rg^(-{rg_exponent}) (m²/s)"
-                        )
+                        r_squared = r2_score(d_fit_si, d_theory_fit_si)
                         print(f"  R² = {r_squared:.3f}")
 
                 except Exception as e:
-                    print(f"Warning: Could not fit inverse power relationship: {e}")
+                    print(f"Warning: Could not fit Stokes-Einstein relationship: {e}")
 
-            plt.xlabel("Radius of Gyration (Å)")
+            plt.xlabel("Hydrodynamic Radius (Å)")
             plt.ylabel("Diffusion Coefficient (m²/s)")
-            plt.title("Diffusion Coefficient vs Radius of Gyration")
+            plt.title("Diffusion Coefficient vs Hydrodynamic Radius")
             plt.grid(True, alpha=0.3)
             plt.legend()
             plt.yscale("log")
@@ -1270,16 +1418,20 @@ def plot_radius_of_gyration_analysis(
 
             if output_dir:
                 plt.savefig(
-                    f"{output_dir}/diffusion_vs_rog.png", dpi=300, bbox_inches="tight"
+                    f"{output_dir}/diffusion_vs_rh.png", dpi=300, bbox_inches="tight"
                 )
             if show_plots:
                 plt.show()
 
         else:
-            print("Warning: No overlapping data between diffusion and Rg measurements")
+            print(
+                "Warning: No overlapping data between diffusion and hydrodynamic radius measurements"
+            )
 
     else:
-        print("Warning: Cannot plot D vs Rg without both diffusion and Rg data")
+        print(
+            "Warning: Cannot plot D vs R_H without both diffusion and hydrodynamic radius data"
+        )
 
 
 def main():
@@ -1337,17 +1489,17 @@ def main():
         help="Calculate squared displacement and diffusion coefficients",
     )
     parser.add_argument(
-        "--rog",
-        "--radius-of-gyration",
+        "--rh",
+        "--hydrodynamic-radius",
         action="store_true",
-        dest="rog",
-        help="Calculate radius of gyration for aggregates by size",
+        dest="rh",
+        help="Calculate hydrodynamic radius for aggregates by size",
     )
     parser.add_argument(
-        "--rog-exponent",
+        "--temperature",
         type=float,
-        default=2.0,
-        help="Exponent for inverse relationship fit: D = a + b * Rg^(-exponent) (default: 2.0)",
+        default=298.15,
+        help="Temperature in Kelvin for effective viscosity calculation (default: 298.15)",
     )
     parser.add_argument(
         "--plot", action="store_true", help="Generate plots for SD analysis"
@@ -1520,12 +1672,12 @@ def main():
             if not args.quiet:
                 print(f"SD fit plot saved to: {args.plot_dir}")
 
-    # Run radius of gyration analysis if requested
-    if args.rog:
+    # Run hydrodynamic radius analysis if requested
+    if args.rh:
         if not args.quiet:
-            print(f"\nCalculating radius of gyration...")
+            print(f"\nCalculating hydrodynamic radius...")
 
-        rg_df = calculate_aggregate_radius_of_gyration(
+        rh_df = calculate_aggregate_hydrodynamic_radius(
             trajectory_path=args.trajectory,
             structure_path=args.structure,
             lifetime_df=results_df,
@@ -1533,50 +1685,50 @@ def main():
             verbose=not args.quiet,
         )
 
-        # Save radius of gyration data
+        # Save hydrodynamic radius data
         if args.output:
             base_name = Path(args.output).stem
-            rog_output = f"{base_name}_rog.csv"
+            rh_output = f"{base_name}_rh.csv"
 
-            rg_df.to_csv(rog_output, index=False)
+            rh_df.to_csv(rh_output, index=False)
 
             if not args.quiet:
-                print(f"Radius of gyration data saved to: {rog_output}")
+                print(f"Hydrodynamic radius data saved to: {rh_output}")
 
-        # Print radius of gyration results
-        if not args.quiet and len(rg_df) > 0:
-            print(f"\nRadius of gyration by aggregate size:")
+        # Print hydrodynamic radius results
+        if not args.quiet and len(rh_df) > 0:
+            print(f"\nHydrodynamic radius by aggregate size:")
             print("-" * 80)
-            print(f"{'Size':<6} {'Rg (Å)':<12} {'Std (Å)':<12} {'N aggregates':<12}")
+            print(f"{'Size':<6} {'R_H (Å)':<12} {'Std (Å)':<12} {'N aggregates':<12}")
             print("-" * 80)
-            for _, row in rg_df.iterrows():
+            for _, row in rh_df.iterrows():
                 print(
                     f"{int(row['aggregation_number']):<6} "
-                    f"{row['radius_of_gyration_avg']:<12.2f} "
-                    f"{row['radius_of_gyration_std']:<12.2f} "
+                    f"{row['hydrodynamic_radius_avg']:<12.2f} "
+                    f"{row['hydrodynamic_radius_std']:<12.2f} "
                     f"{int(row['n_aggregates']):<12}"
                 )
 
-        # Generate radius of gyration plots if requested
+        # Generate hydrodynamic radius plots if requested
         if args.plot:
             if not args.quiet:
-                print(f"\nGenerating radius of gyration plots...")
+                print(f"\nGenerating hydrodynamic radius plots...")
 
             # Check if we have diffusion data for combined plotting
-            diffusion_df_for_rog = (
+            diffusion_df_for_rh = (
                 diffusion_df if args.msd and len(diffusion_df) > 0 else None
             )
 
-            plot_radius_of_gyration_analysis(
-                rg_df=rg_df,
-                diffusion_df=diffusion_df_for_rog,
+            plot_hydrodynamic_radius_analysis(
+                rh_df=rh_df,
+                diffusion_df=diffusion_df_for_rh,
                 output_dir=args.plot_dir,
                 show_plots=not args.quiet,
-                rg_exponent=args.rog_exponent,
+                temperature=args.temperature,
             )
 
             if not args.quiet:
-                print(f"Radius of gyration plots saved to: {args.plot_dir}")
+                print(f"Hydrodynamic radius plots saved to: {args.plot_dir}")
 
 
 if __name__ == "__main__":
