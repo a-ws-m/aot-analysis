@@ -19,6 +19,7 @@ from MDAnalysis.analysis.base import AnalysisBase
 from scipy import stats
 from scipy.sparse.csgraph import connected_components
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
 from tqdm import tqdm
 
 from .cluster import get_adj_array
@@ -400,16 +401,16 @@ def analyze_aggregate_lifetimes(
     return tracker.lifetime_dataframe
 
 
-def calculate_aggregate_msd(
+def calculate_aggregate_sd(
     trajectory_path: str,
     structure_path: str,
     lifetime_df: pd.DataFrame,
     tail_selection: str = "name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Calculate mean squared displacement for each aggregate over its lifetime.
+    """Calculate squared displacement for each aggregate over its lifetime.
 
-    Uses a sliding window approach to calculate MSD within TIMESCALE_CUTOFF
+    Uses a sliding window approach to calculate SD within TIMESCALE_CUTOFF
     windows throughout each aggregate's lifetime, maximizing data utilization
     while avoiding artifacts from very long time scales.
 
@@ -429,7 +430,7 @@ def calculate_aggregate_msd(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: aggregation_number, delta_t, msd
+        DataFrame with columns: aggregation_number, delta_t, sd
     """
     # Load trajectory
     u = mda.Universe(structure_path, trajectory_path)
@@ -440,10 +441,10 @@ def calculate_aggregate_msd(
     for i, residue in enumerate(tailgroups.residues.unique):
         residue_mapping[i] = residue
 
-    msd_data = []
+    sd_data = []
 
     if verbose:
-        print(f"Calculating MSD for {len(lifetime_df)} aggregates...")
+        print(f"Calculating SD for {len(lifetime_df)} aggregates...")
 
     if len(lifetime_df) == 0:
         if verbose:
@@ -521,9 +522,9 @@ def calculate_aggregate_msd(
         # Use sliding windows within TIMESCALE_CUTOFF duration
         n_frames = len(com_trajectory)
 
-        # Calculate MSD using sliding windows approach
+        # Calculate SD using sliding windows approach
         for dt_frames in range(1, min(max_dt_frames + 1, n_frames)):
-            msd_values = []
+            sd_values = []
 
             # Use sliding windows throughout the trajectory
             for start_idx in range(n_frames - dt_frames):
@@ -540,42 +541,42 @@ def calculate_aggregate_msd(
                     elif displacement[dim] < -box_dims[dim] / 2:
                         displacement[dim] += box_dims[dim]
 
-                msd_values.append(np.sum(displacement**2))
+                sd_values.append(np.sum(displacement**2))
 
-            if msd_values:  # Only add if we have valid MSD values
+            if sd_values:  # Only add if we have valid SD values
                 # Calculate actual delta_t for this dt_frames separation
                 delta_t = dt_frames * abs(timestep)
 
-                mean_msd = np.mean(msd_values)
+                mean_sd = np.mean(sd_values)
 
-                msd_data.append(
+                sd_data.append(
                     {
                         "aggregate_id": idx,
                         "aggregation_number": agg_size,
                         "delta_t": delta_t,
-                        "msd": mean_msd,
-                        "n_samples": len(msd_values),
+                        "sd": mean_sd,
+                        "n_samples": len(sd_values),
                     }
                 )
 
-    return pd.DataFrame(msd_data)
+    return pd.DataFrame(sd_data)
 
 
 def estimate_diffusion_coefficients(
-    msd_df: pd.DataFrame, verbose: bool = False, filter_: bool = True
+    sd_df: pd.DataFrame, verbose: bool = False, filter_: bool = True
 ) -> pd.DataFrame:
-    """Estimate diffusion coefficients from MSD data using Einstein relation.
+    """Estimate diffusion coefficients from SD data using Einstein relation.
 
-    D = MSD / (6 * delta_t) for 3D diffusion
+    D = SD / (6 * delta_t) for 3D diffusion
 
-    Uses weighted least squares regression with weights = 1/var(MSD) to account
-    for increasing variance at longer time scales. MSD data is already constrained
-    to reasonable time scales by the sliding window approach in calculate_aggregate_msd.
+    Uses weighted least squares regression with weights = 1/var(SD) to account
+    for increasing variance at longer time scales. SD data is already constrained
+    to reasonable time scales by the sliding window approach in calculate_aggregate_sd.
 
     Parameters
     ----------
-    msd_df : pd.DataFrame
-        DataFrame with MSD data from calculate_aggregate_msd
+    sd_df : pd.DataFrame
+        DataFrame with SD data from calculate_aggregate_sd
     verbose : bool
         Whether to print debugging information
     filter_: bool
@@ -588,17 +589,17 @@ def estimate_diffusion_coefficients(
     """
     diffusion_data = []
 
-    if len(msd_df) == 0:
+    if len(sd_df) == 0:
         if verbose:
-            print("Warning: Empty MSD DataFrame provided")
+            print("Warning: Empty SD DataFrame provided")
         return pd.DataFrame()
 
     # Group by aggregation number
-    n_groups = len(msd_df.groupby("aggregation_number"))
+    n_groups = len(sd_df.groupby("aggregation_number"))
     if verbose:
         print(f"Processing {n_groups} different aggregate sizes...")
 
-    for agg_size, group in msd_df.groupby("aggregation_number"):
+    for agg_size, group in sd_df.groupby("aggregation_number"):
         # Additional filtering for time scales where diffusion behavior is expected to be linear
         # MSD calculation already limits delta_t to TIMESCALE_CUTOFF, but this allows fine-tuning
         if filter_:
@@ -620,9 +621,9 @@ def estimate_diffusion_coefficients(
                 )
             continue
 
-        # Calculate time-dependent variance of MSD across all aggregates of this size
+        # Calculate time-dependent variance of SD across all aggregates of this size
         # Group by delta_t and calculate variance at each time point
-        time_variance = filtered_group.groupby("delta_t")["msd"].var()
+        time_variance = filtered_group.groupby("delta_t")["sd"].var()
 
         # For time points with only one measurement, use a default variance
         time_variance = time_variance.fillna(time_variance.median())
@@ -630,12 +631,12 @@ def estimate_diffusion_coefficients(
         # Create a mapping from delta_t to variance
         variance_map = time_variance.to_dict()
 
-        # Use weighted least squares regression with weights = 1/var(MSD) at each time
+        # Use weighted least squares regression with weights = 1/var(SD) at each time
         try:
             X = np.array(filtered_group["delta_t"].values).reshape(
                 -1, 1
             )  # reshape for sklearn
-            y = np.array(filtered_group["msd"].values)
+            y = np.array(filtered_group["sd"].values)
 
             # Calculate weights as inverse of time-dependent variance
             # Map each delta_t to its corresponding variance
@@ -643,20 +644,18 @@ def estimate_diffusion_coefficients(
             # Add small epsilon to avoid division by zero
             weights = 1.0 / (variances + 1e-12)
 
-            # Fit weighted linear regression: MSD = 6D * delta_t
+            # Fit weighted linear regression: SD = 6D * delta_t
             model = LinearRegression()
             model.fit(X, y, sample_weight=weights)
 
             # Calculate R-squared for weighted regression
             y_pred = model.predict(X)
-            ss_res = np.sum(weights * (y - y_pred) ** 2)
-            ss_tot = np.sum(weights * (y - np.average(y, weights=weights)) ** 2)
-            r_squared = 1 - (ss_res / ss_tot)
+            r_squared = r2_score(y, y_pred, sample_weight=weights)
 
             # Calculate standard error of the slope
             # For weighted least squares, this is more complex
             residuals = y - y_pred
-            mse = np.sum(weights * residuals**2) / (len(y) - 2)  # degrees of freedom
+            mse = mean_squared_error(y, y_pred, sample_weight=weights)
             X_centered = X - np.average(X, weights=weights, axis=0)
             var_slope = mse / np.sum(weights * X_centered**2)
             std_err = np.sqrt(var_slope)
@@ -684,23 +683,23 @@ def estimate_diffusion_coefficients(
     return pd.DataFrame(diffusion_data)
 
 
-def plot_msd_fit(
-    msd_df: pd.DataFrame,
+def plot_sd_fit(
+    sd_df: pd.DataFrame,
     diffusion_df: pd.DataFrame,
     aggregate_size: int = 180,
     output_dir: str = ".",
     show_plots: bool = True,
     filter_: bool = True,
 ):
-    """Plot MSD distribution vs time with fitted line for a specific aggregate size.
+    """Plot SD distribution vs time with fitted line for a specific aggregate size.
 
-    Uses violin plots to show the distribution of MSD values at each time point,
+    Uses violin plots to show the distribution of SD values at each time point,
     with the weighted linear fit overlaid on top.
 
     Parameters
     ----------
-    msd_df : pd.DataFrame
-        MSD data from calculate_aggregate_msd
+    sd_df : pd.DataFrame
+        SD data from calculate_aggregate_sd
     diffusion_df : pd.DataFrame
         Diffusion coefficient data from estimate_diffusion_coefficients
     aggregate_size : int
@@ -713,7 +712,7 @@ def plot_msd_fit(
         Whether to filter out long and short time scales.
     """
     # Filter data for the specific aggregate size
-    size_data = msd_df[msd_df["aggregation_number"] == aggregate_size]
+    size_data = sd_df[sd_df["aggregation_number"] == aggregate_size]
 
     if len(size_data) == 0:
         print(f"Warning: No data found for aggregate size {aggregate_size}")
@@ -749,11 +748,11 @@ def plot_msd_fit(
     # Create the plot
     plt.figure(figsize=(12, 8))
 
-    # Create violin plot to show distribution of MSD values at each time point
+    # Create violin plot to show distribution of SD values at each time point
     sns.violinplot(
         data=filtered_data,
         x="delta_t",
-        y="msd",
+        y="sd",
         native_scale=True,
         alpha=0.7,
         common_norm=False,
@@ -765,19 +764,23 @@ def plot_msd_fit(
     t_fit = np.linspace(
         filtered_data["delta_t"].min(), filtered_data["delta_t"].max(), 100
     )
-    msd_fit = slope * t_fit + intercept
+    sd_fit = slope * t_fit + intercept
+
+    # Convert diffusion coefficient to m²/s for display
+    diffusion_coeff_si = diffusion_coeff * 1e-8  # Å²/ps to m²/s
+
     plt.plot(
         t_fit,
-        msd_fit,
+        sd_fit,
         "r-",
         linewidth=3,
-        label=f"Weighted fit: D = {diffusion_coeff:.4f} Å²/ps",
+        label=f"Weighted fit: D = {diffusion_coeff_si:.2e} m²/s",
         zorder=10,
     )
 
     plt.xlabel("Δt (ps)")
-    plt.ylabel("MSD (Å²)")
-    plt.title(f"MSD Distribution vs Time for Aggregate Size {aggregate_size}")
+    plt.ylabel("SD (Å²)")
+    plt.title(f"SD Distribution vs Time for Aggregate Size {aggregate_size}")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -796,7 +799,7 @@ def plot_msd_fit(
     # Save plot
     if output_dir:
         plt.savefig(
-            f"{output_dir}/msd_fit_size_{aggregate_size}.png",
+            f"{output_dir}/sd_fit_size_{aggregate_size}.png",
             dpi=300,
             bbox_inches="tight",
         )
@@ -805,20 +808,20 @@ def plot_msd_fit(
         plt.show()
 
 
-def plot_msd_analysis(
-    msd_df: pd.DataFrame,
+def plot_sd_analysis(
+    sd_df: pd.DataFrame,
     diffusion_df: pd.DataFrame,
     output_dir: str = ".",
     show_plots: bool = True,
     include_r_squared: bool = False,
     filter_: bool = True,
 ):
-    """Create plots for MSD analysis and diffusion coefficients.
+    """Create plots for SD analysis and diffusion coefficients.
 
     Parameters
     ----------
-    msd_df : pd.DataFrame
-        MSD data from calculate_aggregate_msd
+    sd_df : pd.DataFrame
+        SD data from calculate_aggregate_sd
     diffusion_df : pd.DataFrame
         Diffusion coefficient data from estimate_diffusion_coefficients
     output_dir : str
@@ -828,31 +831,31 @@ def plot_msd_analysis(
     include_r_squared : bool
         Whether to annotate diffusion plot with R² values.
     filter_ : bool
-        Whether to filter out long and short time scales in MSD plot.
+        Whether to filter out long and short time scales in SD plot.
 
     """
     # Set up the plotting style
     plt.style.use("default")
     sns.set_palette("husl")
 
-    # Plot 1: MSD vs delta_t colored by aggregate size
-    if len(msd_df) > 0:
+    # Plot 1: SD vs delta_t colored by aggregate size
+    if len(sd_df) > 0:
         plt.figure(figsize=(10, 6))
 
         # Filter data for better visualization (limit aggregate sizes for readability)
-        # plot_data = msd_df[msd_df["aggregation_number"] <= 20]
+        # plot_data = sd_df[sd_df["aggregation_number"] <= 20]
         if filter_:
-            plot_data = msd_df[
-                (msd_df["delta_t"] >= 1) & (msd_df["delta_t"] <= TIMESCALE_CUTOFF)
+            plot_data = sd_df[
+                (sd_df["delta_t"] >= 1) & (sd_df["delta_t"] <= TIMESCALE_CUTOFF)
             ]
         else:
-            plot_data = msd_df
+            plot_data = sd_df
 
         if len(plot_data) > 0:
             g = sns.relplot(
                 data=plot_data,
                 x="delta_t",
-                y="msd",
+                y="sd",
                 hue="aggregation_number",
                 kind="line",
                 height=6,
@@ -860,30 +863,36 @@ def plot_msd_analysis(
                 alpha=0.7,
             )
 
-            g.set_axis_labels("Δt (ps)", "MSD (Å$^2$)")
+            g.set_axis_labels("Δt (ps)", "SD (Å$^2$)")
             g.set(yscale="log")
-            g.figure.suptitle("Mean Squared Displacement vs Time by Aggregate Size")
+            g.figure.suptitle("Squared Displacement vs Time by Aggregate Size")
             plt.tight_layout()
 
             if output_dir:
                 plt.savefig(
-                    f"{output_dir}/msd_vs_time.png", dpi=300, bbox_inches="tight"
+                    f"{output_dir}/sd_vs_time.png", dpi=300, bbox_inches="tight"
                 )
             if show_plots:
                 plt.show()
         else:
-            print("Warning: No MSD data in the specified range for plotting")
+            print("Warning: No SD data in the specified range for plotting")
     else:
-        print("Warning: No MSD data available for plotting")
+        print("Warning: No SD data available for plotting")
 
     # Plot 2: Diffusion coefficient vs aggregate size
     if len(diffusion_df) > 0 and "aggregation_number" in diffusion_df.columns:
         plt.figure(figsize=(8, 6))
 
+        # Convert diffusion coefficients to m²/s for display
+        diffusion_coeff_si = (
+            diffusion_df["diffusion_coefficient"] * 1e-8
+        )  # Å²/ps to m²/s
+        diffusion_error_si = diffusion_df["diffusion_error"] * 1e-8  # Å²/ps to m²/s
+
         plt.errorbar(
             diffusion_df["aggregation_number"],
-            diffusion_df["diffusion_coefficient"],
-            yerr=diffusion_df["diffusion_error"],
+            diffusion_coeff_si,
+            yerr=diffusion_error_si,
             fmt="o-",
             capsize=5,
             capthick=2,
@@ -891,16 +900,18 @@ def plot_msd_analysis(
         )
 
         plt.xlabel("Aggregation Number")
-        plt.ylabel("Diffusion Coefficient (Å$^2$/ps)")
+        plt.ylabel("Diffusion Coefficient (m²/s)")
         plt.title("Diffusion Coefficient vs Aggregate Size")
         plt.grid(True, alpha=0.3)
 
         if include_r_squared:
             # Add R² values as text annotations
             for _, row in diffusion_df.iterrows():
+                # Convert diffusion coefficient to SI units for annotation position
+                diffusion_coeff_si_val = row["diffusion_coefficient"] * 1e-8
                 plt.annotate(
                     f'R²={row["r_squared"]:.3f}',
-                    (row["aggregation_number"], row["diffusion_coefficient"]),
+                    (row["aggregation_number"], diffusion_coeff_si_val),
                     xytext=(5, 5),
                     textcoords="offset points",
                     fontsize=8,
@@ -970,22 +981,24 @@ def main():
     )
     parser.add_argument(
         "--msd",
+        "--sd",
         action="store_true",
-        help="Calculate mean squared displacement and diffusion coefficients",
+        dest="msd",
+        help="Calculate squared displacement and diffusion coefficients",
     )
     parser.add_argument(
-        "--plot", action="store_true", help="Generate plots for MSD analysis"
+        "--plot", action="store_true", help="Generate plots for SD analysis"
     )
     parser.add_argument(
         "--plot-fit",
         action="store_true",
-        help="Generate MSD fit plot for specific aggregate size",
+        help="Generate SD fit plot for specific aggregate size",
     )
     parser.add_argument(
         "--fit-size",
         type=int,
         default=180,
-        help="Aggregate size for MSD fit plot (default: 180)",
+        help="Aggregate size for SD fit plot (default: 180)",
     )
     parser.add_argument(
         "--plot-dir",
@@ -1058,12 +1071,12 @@ def main():
                 percentage = (count / len(results_df)) * 100
                 print(f"Size {size:2d}: {count:3d} aggregates ({percentage:5.1f}%)")
 
-    # Run MSD analysis if requested
+    # Run SD analysis if requested
     if args.msd:
         if not args.quiet:
-            print(f"\nCalculating mean squared displacement...")
+            print(f"\nCalculating squared displacement...")
 
-        msd_df = calculate_aggregate_msd(
+        sd_df = calculate_aggregate_sd(
             trajectory_path=args.trajectory,
             structure_path=args.structure,
             lifetime_df=results_df,
@@ -1075,19 +1088,19 @@ def main():
         if not args.quiet:
             print(f"Estimating diffusion coefficients...")
 
-        diffusion_df = estimate_diffusion_coefficients(msd_df, verbose=not args.quiet)
+        diffusion_df = estimate_diffusion_coefficients(sd_df, verbose=not args.quiet)
 
-        # Save MSD and diffusion data
+        # Save SD and diffusion data
         if args.output:
             base_name = Path(args.output).stem
-            msd_output = f"{base_name}_msd.csv"
+            sd_output = f"{base_name}_sd.csv"
             diffusion_output = f"{base_name}_diffusion.csv"
 
-            msd_df.to_csv(msd_output, index=False)
+            sd_df.to_csv(sd_output, index=False)
             diffusion_df.to_csv(diffusion_output, index=False)
 
             if not args.quiet:
-                print(f"MSD data saved to: {msd_output}")
+                print(f"SD data saved to: {sd_output}")
                 print(f"Diffusion data saved to: {diffusion_output}")
 
         # Print diffusion coefficient results
@@ -1095,14 +1108,17 @@ def main():
             print(f"\nDiffusion coefficients by aggregate size:")
             print("-" * 70)
             print(
-                f"{'Size':<6} {'D (Å$^2$/ps)':<12} {'Error':<12} {'R²':<8} {'N points':<8}"
+                f"{'Size':<6} {'D (m²/s)':<15} {'Error (m²/s)':<15} {'R²':<8} {'N points':<8}"
             )
             print("-" * 70)
             for _, row in diffusion_df.iterrows():
+                # Convert to SI units for display
+                d_si = row["diffusion_coefficient"] * 1e-8  # Å²/ps to m²/s
+                d_err_si = row["diffusion_error"] * 1e-8  # Å²/ps to m²/s
                 print(
                     f"{int(row['aggregation_number']):<6} "
-                    f"{row['diffusion_coefficient']:<12.4f} "
-                    f"{row['diffusion_error']:<12.4f} "
+                    f"{d_si:<15.2e} "
+                    f"{d_err_si:<15.2e} "
                     f"{row['r_squared']:<8.3f} "
                     f"{int(row['n_points']):<8}"
                 )
@@ -1112,8 +1128,8 @@ def main():
             if not args.quiet:
                 print(f"\nGenerating plots...")
 
-            plot_msd_analysis(
-                msd_df=msd_df,
+            plot_sd_analysis(
+                sd_df=sd_df,
                 diffusion_df=diffusion_df,
                 output_dir=args.plot_dir,
                 show_plots=not args.quiet,
@@ -1122,13 +1138,13 @@ def main():
             if not args.quiet:
                 print(f"Plots saved to: {args.plot_dir}")
 
-        # Generate MSD fit plot if requested
+        # Generate SD fit plot if requested
         if args.plot_fit:
             if not args.quiet:
-                print(f"\nGenerating MSD fit plot for size {args.fit_size}...")
+                print(f"\nGenerating SD fit plot for size {args.fit_size}...")
 
-            plot_msd_fit(
-                msd_df=msd_df,
+            plot_sd_fit(
+                sd_df=sd_df,
                 diffusion_df=diffusion_df,
                 aggregate_size=args.fit_size,
                 output_dir=args.plot_dir,
@@ -1136,7 +1152,7 @@ def main():
             )
 
             if not args.quiet:
-                print(f"MSD fit plot saved to: {args.plot_dir}")
+                print(f"SD fit plot saved to: {args.plot_dir}")
 
 
 if __name__ == "__main__":
