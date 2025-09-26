@@ -318,6 +318,60 @@ def hypersphere_center_of_mass(
     return true_com
 
 
+def calculate_radius_of_gyration(
+    positions: np.ndarray,
+    box_dimensions: np.ndarray,
+    masses: Optional[np.ndarray] = None,
+    center_of_mass: Optional[np.ndarray] = None,
+) -> float:
+    """Calculate radius of gyration for a set of particles with PBC handling.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Shape (N, 3) array of particle positions
+    box_dimensions : np.ndarray
+        Shape (3,) array of box dimensions
+    masses : np.ndarray, optional
+        Shape (N,) array of particle masses. If None, assumes equal masses.
+    center_of_mass : np.ndarray, optional
+        Shape (3,) center of mass position. If None, will be calculated.
+
+    Returns
+    -------
+    float
+        Radius of gyration in same units as positions
+    """
+    if masses is None:
+        masses = np.ones(len(positions))
+
+    # Calculate center of mass if not provided
+    if center_of_mass is None:
+        center_of_mass = hypersphere_center_of_mass(positions, box_dimensions, masses)
+
+    # Calculate distances from center of mass with PBC
+    distances_squared = np.zeros(len(positions))
+    total_mass = np.sum(masses)
+
+    for i, pos in enumerate(positions):
+        # Calculate displacement vector from COM
+        displacement = pos - center_of_mass
+
+        # Apply minimum image convention for PBC
+        for dim in range(3):
+            if displacement[dim] > box_dimensions[dim] / 2:
+                displacement[dim] -= box_dimensions[dim]
+            elif displacement[dim] < -box_dimensions[dim] / 2:
+                displacement[dim] += box_dimensions[dim]
+
+        distances_squared[i] = np.sum(displacement**2)
+
+    # Calculate weighted average of squared distances
+    rg_squared = np.sum(masses * distances_squared) / total_mass
+
+    return np.sqrt(rg_squared)
+
+
 def analyze_aggregate_lifetimes(
     trajectory_path: str,
     structure_path: str,
@@ -560,6 +614,133 @@ def calculate_aggregate_sd(
                 )
 
     return pd.DataFrame(sd_data)
+
+
+def calculate_aggregate_radius_of_gyration(
+    trajectory_path: str,
+    structure_path: str,
+    lifetime_df: pd.DataFrame,
+    tail_selection: str = "name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Calculate average radius of gyration for aggregates by size.
+
+    Parameters
+    ----------
+    trajectory_path : str
+        Path to the trajectory file
+    structure_path : str
+        Path to the structure/topology file
+    lifetime_df : pd.DataFrame
+        DataFrame with aggregate lifetimes from analyze_aggregate_lifetimes
+    tail_selection : str
+        MDAnalysis selection string for tail atoms
+    verbose : bool
+        Whether to print progress information
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: aggregation_number, radius_of_gyration_avg, radius_of_gyration_std, n_aggregates
+    """
+    # Load trajectory
+    u = mda.Universe(structure_path, trajectory_path)
+    tailgroups = u.select_atoms(tail_selection)
+
+    # Create mapping from molecule index to residue
+    residue_mapping = {}
+    for i, residue in enumerate(tailgroups.residues.unique):
+        residue_mapping[i] = residue
+
+    # Store radius of gyration data by aggregation number
+    rg_by_size = defaultdict(list)
+
+    if verbose:
+        print(f"Calculating radius of gyration for {len(lifetime_df)} aggregates...")
+
+    if len(lifetime_df) == 0:
+        if verbose:
+            print("Warning: No aggregate lifetime data provided")
+        return pd.DataFrame()
+
+    # Process each unique aggregate
+    for idx, (molecules_tuple, start_frame) in tqdm(
+        enumerate(lifetime_df.index),
+        desc="Processing aggregate radius of gyration",
+        total=len(lifetime_df.index),
+    ):
+        agg_data = lifetime_df.loc[(molecules_tuple, start_frame)]
+
+        # Get molecule indices and aggregate info
+        molecule_indices = (
+            molecules_tuple
+            if isinstance(molecules_tuple, tuple)
+            else eval(molecules_tuple)
+        )
+
+        # Extract values, handling potential Series indexing issues
+        try:
+            agg_size = int(agg_data["aggregation_number"])  # type: ignore
+            end_frame_val = int(agg_data["end_frame"])  # type: ignore
+        except (KeyError, AttributeError, IndexError, TypeError) as e:
+            if verbose:
+                print(f"Warning: Could not extract data for aggregate {idx}: {e}")
+            continue
+
+        start_frame_val = int(start_frame)
+
+        # Get the residues for this aggregate
+        agg_residues = [residue_mapping[mol_idx] for mol_idx in molecule_indices]
+
+        # Get positions of all atoms in the aggregate
+        # Start with the first residue's atoms
+        agg_atoms = agg_residues[0].atoms
+        for residue in agg_residues[1:]:
+            agg_atoms += residue.atoms
+
+        # Calculate radius of gyration at multiple time points during aggregate's lifetime
+        rg_values = []
+
+        # Sample frames throughout the aggregate's lifetime
+        total_frames = end_frame_val - start_frame_val + 1
+        # Sample every 10 frames or at least 5 frames, but don't exceed total frames
+        sample_interval = max(1, min(10, total_frames // 5))
+        sample_frames = range(start_frame_val, end_frame_val + 1, sample_interval)
+
+        for frame_idx in sample_frames:
+            u.trajectory[frame_idx]
+
+            # Calculate center of mass using improved hypersphere method with masses
+            com = hypersphere_center_of_mass(
+                agg_atoms.positions, u.dimensions[:3], agg_atoms.masses
+            )
+
+            # Calculate radius of gyration
+            rg = calculate_radius_of_gyration(
+                agg_atoms.positions, u.dimensions[:3], agg_atoms.masses, com
+            )
+
+            rg_values.append(rg)
+
+        if rg_values:  # Only add if we have valid Rg values
+            # Calculate average radius of gyration for this aggregate
+            avg_rg = np.mean(rg_values)
+            rg_by_size[agg_size].append(avg_rg)
+
+    # Create summary DataFrame
+    rg_summary_data = []
+    for agg_size, rg_values in rg_by_size.items():
+        if rg_values:
+            rg_summary_data.append(
+                {
+                    "aggregation_number": agg_size,
+                    "radius_of_gyration_avg": np.mean(rg_values),
+                    "radius_of_gyration_std": np.std(rg_values),
+                    "n_aggregates": len(rg_values),
+                }
+            )
+
+    return pd.DataFrame(rg_summary_data)
 
 
 def estimate_diffusion_coefficients(
@@ -934,9 +1115,162 @@ def plot_sd_analysis(
         print("- Aggregates too short-lived for meaningful MSD calculation")
 
 
+def plot_radius_of_gyration_analysis(
+    rg_df: pd.DataFrame,
+    diffusion_df: Optional[pd.DataFrame] = None,
+    output_dir: str = ".",
+    show_plots: bool = True,
+):
+    """Create plots for radius of gyration analysis.
+
+    Parameters
+    ----------
+    rg_df : pd.DataFrame
+        Radius of gyration data from calculate_aggregate_radius_of_gyration
+    diffusion_df : pd.DataFrame, optional
+        Diffusion coefficient data from estimate_diffusion_coefficients
+    output_dir : str
+        Directory to save plots
+    show_plots : bool
+        Whether to display plots
+    """
+    # Set up the plotting style
+    plt.style.use("default")
+    sns.set_palette("husl")
+
+    # Plot 1: Radius of gyration vs aggregation number
+    if len(rg_df) > 0:
+        plt.figure(figsize=(8, 6))
+
+        plt.errorbar(
+            rg_df["aggregation_number"],
+            rg_df["radius_of_gyration_avg"],
+            yerr=rg_df["radius_of_gyration_std"],
+            fmt="o-",
+            capsize=5,
+            capthick=2,
+            alpha=0.8,
+            label="Radius of gyration",
+        )
+
+        plt.xlabel("Aggregation Number")
+        plt.ylabel("Radius of Gyration (Å)")
+        plt.title("Radius of Gyration vs Aggregate Size")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+
+        if output_dir:
+            plt.savefig(f"{output_dir}/rog_vs_size.png", dpi=300, bbox_inches="tight")
+        if show_plots:
+            plt.show()
+
+    # Plot 2: Diffusion coefficient vs radius of gyration with inverse cubic fit
+    if diffusion_df is not None and len(diffusion_df) > 0 and len(rg_df) > 0:
+        # Merge the dataframes on aggregation number
+        merged_df = pd.merge(diffusion_df, rg_df, on="aggregation_number", how="inner")
+
+        if len(merged_df) > 0:
+            plt.figure(figsize=(10, 6))
+
+            # Convert diffusion coefficients to m²/s for display
+            diffusion_coeff_si = (
+                merged_df["diffusion_coefficient"] * 1e-8
+            )  # Å²/ps to m²/s
+            diffusion_error_si = merged_df["diffusion_error"] * 1e-8  # Å²/ps to m²/s
+
+            # Plot data points with error bars
+            plt.errorbar(
+                merged_df["radius_of_gyration_avg"],
+                diffusion_coeff_si,
+                xerr=merged_df["radius_of_gyration_std"],
+                yerr=diffusion_error_si,
+                fmt="o",
+                capsize=5,
+                capthick=2,
+                alpha=0.8,
+                label="Data",
+            )
+
+            # Fit inverse cubic relationship: D = a / Rg^3
+            # Use log-log regression: log(D) = log(a) - 3*log(Rg)
+            if len(merged_df) >= 3:  # Need at least 3 points for fitting
+                try:
+                    rg_values = np.array(merged_df["radius_of_gyration_avg"])
+                    d_values = np.array(
+                        merged_df["diffusion_coefficient"]
+                    )  # Keep in Å²/ps for fitting
+
+                    # Filter out any non-positive values
+                    valid_mask = (rg_values > 0) & (d_values > 0)
+                    if np.sum(valid_mask) >= 3:
+                        rg_fit = rg_values[valid_mask]
+                        d_fit = d_values[valid_mask]
+
+                        # Log-log regression
+                        log_rg = np.log(rg_fit)
+                        log_d = np.log(d_fit)
+
+                        # Fit: log(D) = log(a) - 3*log(Rg)
+                        X_fit = np.column_stack([np.ones(len(log_rg)), log_rg])
+                        coeffs = np.linalg.lstsq(X_fit, log_d, rcond=None)[0]
+                        log_a, slope = coeffs
+
+                        # Calculate R-squared
+                        log_d_pred = log_a + slope * log_rg
+                        ss_res = np.sum((log_d - log_d_pred) ** 2)
+                        ss_tot = np.sum((log_d - np.mean(log_d)) ** 2)
+                        r_squared = 1 - (ss_res / ss_tot)
+
+                        # Generate fitted curve
+                        rg_range = np.linspace(rg_fit.min(), rg_fit.max(), 100)
+                        d_fitted = np.exp(log_a) * (rg_range**slope)
+                        d_fitted_si = d_fitted * 1e-8  # Convert to m²/s for plotting
+
+                        plt.plot(
+                            rg_range,
+                            d_fitted_si,
+                            "r-",
+                            linewidth=2,
+                            label=f"Fit: D ∝ Rg^{slope:.2f} (R² = {r_squared:.3f})",
+                        )
+
+                        print(f"Inverse relationship fit:")
+                        print(f"  D = {np.exp(log_a):.2e} * Rg^{slope:.2f} (Å²/ps)")
+                        print(f"  R² = {r_squared:.3f}")
+                        print(f"  Expected slope for D ∝ 1/Rg³: -3.0")
+
+                except Exception as e:
+                    print(f"Warning: Could not fit inverse cubic relationship: {e}")
+
+            plt.xlabel("Radius of Gyration (Å)")
+            plt.ylabel("Diffusion Coefficient (m²/s)")
+            plt.title("Diffusion Coefficient vs Radius of Gyration")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.yscale("log")
+            plt.xscale("log")
+            plt.tight_layout()
+
+            if output_dir:
+                plt.savefig(
+                    f"{output_dir}/diffusion_vs_rog.png", dpi=300, bbox_inches="tight"
+                )
+            if show_plots:
+                plt.show()
+
+        else:
+            print("Warning: No overlapping data between diffusion and Rg measurements")
+
+    else:
+        print("Warning: Cannot plot D vs Rg without both diffusion and Rg data")
+
+
 def main():
     """Command-line interface for aggregate lifetime analysis."""
     import argparse
+
+    sns.set_theme(context="talk", style="whitegrid")
 
     parser = argparse.ArgumentParser(
         description="Analyze aggregate lifetimes in molecular dynamics trajectories"
@@ -985,6 +1319,13 @@ def main():
         action="store_true",
         dest="msd",
         help="Calculate squared displacement and diffusion coefficients",
+    )
+    parser.add_argument(
+        "--rog",
+        "--radius-of-gyration",
+        action="store_true",
+        dest="rog",
+        help="Calculate radius of gyration for aggregates by size",
     )
     parser.add_argument(
         "--plot", action="store_true", help="Generate plots for SD analysis"
@@ -1071,6 +1412,9 @@ def main():
                 percentage = (count / len(results_df)) * 100
                 print(f"Size {size:2d}: {count:3d} aggregates ({percentage:5.1f}%)")
 
+    # Initialize variables for optional analyses
+    diffusion_df = pd.DataFrame()
+
     # Run SD analysis if requested
     if args.msd:
         if not args.quiet:
@@ -1153,6 +1497,63 @@ def main():
 
             if not args.quiet:
                 print(f"SD fit plot saved to: {args.plot_dir}")
+
+    # Run radius of gyration analysis if requested
+    if args.rog:
+        if not args.quiet:
+            print(f"\nCalculating radius of gyration...")
+
+        rg_df = calculate_aggregate_radius_of_gyration(
+            trajectory_path=args.trajectory,
+            structure_path=args.structure,
+            lifetime_df=results_df,
+            tail_selection=args.tail_selection,
+            verbose=not args.quiet,
+        )
+
+        # Save radius of gyration data
+        if args.output:
+            base_name = Path(args.output).stem
+            rog_output = f"{base_name}_rog.csv"
+
+            rg_df.to_csv(rog_output, index=False)
+
+            if not args.quiet:
+                print(f"Radius of gyration data saved to: {rog_output}")
+
+        # Print radius of gyration results
+        if not args.quiet and len(rg_df) > 0:
+            print(f"\nRadius of gyration by aggregate size:")
+            print("-" * 80)
+            print(f"{'Size':<6} {'Rg (Å)':<12} {'Std (Å)':<12} {'N aggregates':<12}")
+            print("-" * 80)
+            for _, row in rg_df.iterrows():
+                print(
+                    f"{int(row['aggregation_number']):<6} "
+                    f"{row['radius_of_gyration_avg']:<12.2f} "
+                    f"{row['radius_of_gyration_std']:<12.2f} "
+                    f"{int(row['n_aggregates']):<12}"
+                )
+
+        # Generate radius of gyration plots if requested
+        if args.plot:
+            if not args.quiet:
+                print(f"\nGenerating radius of gyration plots...")
+
+            # Check if we have diffusion data for combined plotting
+            diffusion_df_for_rog = (
+                diffusion_df if args.msd and len(diffusion_df) > 0 else None
+            )
+
+            plot_radius_of_gyration_analysis(
+                rg_df=rg_df,
+                diffusion_df=diffusion_df_for_rog,
+                output_dir=args.plot_dir,
+                show_plots=not args.quiet,
+            )
+
+            if not args.quiet:
+                print(f"Radius of gyration plots saved to: {args.plot_dir}")
 
 
 if __name__ == "__main__":
