@@ -1350,7 +1350,8 @@ def plot_hydrodynamic_radius_analysis(
             )
 
             # Fit Stokes-Einstein relationship: D = k_BT/(6πηR_H)
-            # Rearrange to: η = k_BT/(6πD*R_H)
+            # Rearrange to: D*R_H = k_BT/(6πη) = constant
+            # We'll fit D as a function of 1/R_H using LinearRegression
             if len(merged_df) >= 3:  # Need at least 3 points for fitting
                 try:
                     rh_values = np.array(merged_df["hydrodynamic_radius_avg"])  # Å
@@ -1368,40 +1369,62 @@ def plot_hydrodynamic_radius_analysis(
                         rh_fit_m = rh_values_m[valid_mask]
                         d_fit_si = d_values_si[valid_mask]
 
-                        # Calculate effective viscosity for each point
-                        eta_values = (
-                            k_B * temperature / (6 * np.pi * d_fit_si * rh_fit_m)
+                        # Use LinearRegression to fit D = (k_BT/(6πη)) * (1/R_H)
+                        # X = 1/R_H, y = D
+                        X = (1.0 / rh_fit_m).reshape(-1, 1)  # Shape (n_samples, 1)
+                        y = d_fit_si
+
+                        # Fit the linear model
+                        regressor = LinearRegression(fit_intercept=False)
+                        regressor.fit(X, y)
+
+                        # Get the slope and intercept
+                        slope = regressor.coef_[0]  # This is k_BT/(6πη)
+                        intercept = 0.0  # Since we forced intercept to zero
+
+                        # Calculate effective viscosity from the slope
+                        eta_fitted = k_B * temperature / (6 * np.pi * slope)
+
+                        # Calculate R² score
+                        y_pred = regressor.predict(X)
+                        r_squared = r2_score(y, y_pred)
+
+                        # Calculate standard error of the slope for uncertainty estimation
+                        residuals = y - y_pred
+                        mse = np.mean(residuals**2)
+                        X_centered = X - np.mean(X)
+                        slope_variance = mse / np.sum(X_centered**2)
+                        slope_std_err = np.sqrt(slope_variance)
+
+                        # Propagate uncertainty to viscosity
+                        eta_std_err = (
+                            k_B * temperature * slope_std_err / (6 * np.pi * slope**2)
                         )
 
-                        # Calculate average effective viscosity
-                        eta_avg = np.mean(eta_values)
-                        eta_std = np.std(eta_values)
-
-                        # Generate theoretical curve using average viscosity
+                        # Generate theoretical curve using fitted parameters
                         rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
                         rh_range_m = rh_range * 1e-10  # Convert to m
-                        d_theory_si = (
-                            k_B * temperature / (6 * np.pi * eta_avg * rh_range_m)
-                        )
+                        X_range = (1.0 / rh_range_m).reshape(-1, 1)
+                        d_theory_si = regressor.predict(X_range)
 
                         plt.plot(
                             rh_range,
                             d_theory_si,
                             "r-",
                             linewidth=2,
-                            label=f"Stokes-Einstein: η = {eta_avg*1000:.2f} ± {eta_std*1000:.2f} mPa·s",
+                            label=f"Stokes-Einstein fit: η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s",
                         )
 
-                        print(f"Effective viscosity from Stokes-Einstein relation:")
-                        print(f"  η = {eta_avg*1000:.2f} ± {eta_std*1000:.2f} mPa·s")
-                        print(f"  η = {eta_avg:.2e} ± {eta_std:.2e} Pa·s")
+                        print(
+                            f"Effective viscosity from Stokes-Einstein LinearRegression fit:"
+                        )
+                        print(
+                            f"  η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                        )
+                        print(f"  η = {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
                         print(f"  Temperature: {temperature:.1f} K")
-
-                        # Calculate R² for the fit
-                        d_theory_fit_si = (
-                            k_B * temperature / (6 * np.pi * eta_avg * rh_fit_m)
-                        )
-                        r_squared = r2_score(d_fit_si, d_theory_fit_si)
+                        print(f"  Slope: {slope:.2e} m³/s")
+                        print(f"  Intercept: {intercept:.2e} m²/s")
                         print(f"  R² = {r_squared:.3f}")
 
                 except Exception as e:
@@ -1412,8 +1435,8 @@ def plot_hydrodynamic_radius_analysis(
             plt.title("Diffusion Coefficient vs Hydrodynamic Radius")
             plt.grid(True, alpha=0.3)
             plt.legend()
-            plt.yscale("log")
-            plt.xscale("log")
+            # plt.yscale("log")
+            # plt.xscale("log")
             plt.tight_layout()
 
             if output_dir:
