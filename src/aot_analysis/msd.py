@@ -1,166 +1,950 @@
-"""
-Script to compute mean squared displacement (MSD) of aggregates of various sizes from a trajectory and adjacency matrix file.
+"""Utilities for tracking aggregate lifetimes across molecular dynamics simulations.
 
-Usage:
-    python msd.py <tpr_file> <traj_file> <adj_file>
-
-Outputs:
-    Prints MSD as a function of time for each aggregate size.
+This module provides functionality to analyze the lifetime of molecular aggregates
+by tracking their formation, persistence, and dissolution over time. A unique
+aggregate is defined by its constituent molecules, and lifetimes track concurrent
+timesteps where the aggregate exists.
 """
 
-import argparse
 from collections import defaultdict
 from pathlib import Path
+from typing import FrozenSet, Optional, Set
 
 import matplotlib.pyplot as plt
 import MDAnalysis as mda
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from MDAnalysis.analysis.base import AnalysisBase
+from scipy import stats
 from scipy.sparse.csgraph import connected_components
-from scipy.stats import linregress
 from tqdm import tqdm
 
-from aot_analysis.utilities import load_sparse
+from .cluster import get_adj_array
+
+TIMESCALE_CUTOFF = 2500  # ps
 
 
-def get_aggregates(adj_mat):
-    """Return a list of sets, each set is the indices of molecules in an aggregate."""
+class AggregateLifetimeTracker(AnalysisBase):
+    """Class for tracking aggregate lifetimes across MD trajectories.
 
-    n_components, labels = connected_components(adj_mat, directed=False)
-    aggregates = defaultdict(list)
-    for idx, label in enumerate(labels):
-        aggregates[label].append(idx)
-    return [set(members) for members in aggregates.values()]
+    This analysis identifies molecular aggregates at each frame and tracks their
+    lifetimes by monitoring when the same set of molecules forms aggregates
+    across consecutive timesteps.
+
+    Parameters
+    ----------
+    tailgroups : MDAnalysis.AtomGroup
+        Atoms used for clustering (typically tail atoms of surfactants)
+    cutoff : float, default=4.25
+        Distance cutoff for adjacency matrix calculation (Angstroms)
+    min_cluster_size : int, default=5
+        Minimum number of molecules required to define an aggregate
+    verbose : bool, default=True
+        Whether to print progress information
+    """
+
+    def __init__(
+        self,
+        tailgroups: mda.AtomGroup,
+        cutoff: float = 4.25,
+        min_cluster_size: int = 5,
+        verbose: bool = True,
+        **kwargs,
+    ):
+        trajectory = tailgroups.universe.trajectory
+        super().__init__(trajectory, verbose, **kwargs)
+
+        self.tailgroups = tailgroups
+        self.cutoff = cutoff
+        self.min_cluster_size = min_cluster_size
+
+        # Calculate molecule information
+        self.num_surf = tailgroups.n_residues
+        self.whole_molecules = tailgroups.residues.unique
+        self.atom_per_mol = int(len(tailgroups) / self.num_surf)
+
+        # Sort tailgroups by residue number for consistent indexing
+        tailgroups_ = tailgroups.universe.atoms[[]]
+        for residue in self.whole_molecules:
+            tailgroups_ += residue.atoms & tailgroups
+        self.tailgroups = tailgroups_
+
+        # Storage for tracking aggregates over time
+        self.active_aggregates: dict[FrozenSet[int], dict] = {}
+        self.completed_aggregates: list[dict] = []
+
+        # Results storage
+        self.results = {}
+
+    def _single_frame(self):
+        """Process a single frame to identify aggregates and update lifetimes."""
+        current_frame = int(self._ts.frame)
+        current_time = self._ts.time
+
+        # Calculate adjacency matrix for current frame (molecule-level)
+        # get_adj_array internally uses atom_to_mol_pairs to convert atom contacts
+        # to molecule contacts, so the resulting matrix is (num_molecules, num_molecules)
+        sparse_adj_arr = get_adj_array(
+            self.tailgroups, self.cutoff, self._ts.dimensions
+        )
+
+        # Find connected components (aggregates)
+        # connected_comps contains molecule indices, not atom indices
+        n_aggregates, connected_comps = connected_components(
+            sparse_adj_arr, directed=False
+        )
+
+        # Identify current aggregates (as sets of molecule indices)
+        # Note: connected_comps already contains molecule-level clustering because
+        # get_adj_array internally converts atom pairs to molecule pairs
+        current_aggregates: Set[FrozenSet[int]] = set()
+
+        for i in range(n_aggregates):
+            # Get molecule indices for this aggregate
+            molecule_indices = np.where(connected_comps == i)[0]
+            agg_size = len(molecule_indices)
+
+            # Only consider aggregates above minimum size
+            if agg_size >= self.min_cluster_size:
+                current_aggregates.add(frozenset(molecule_indices))
+
+        # Update aggregate lifetimes
+        self._update_aggregate_lifetimes(
+            current_aggregates, current_frame, current_time
+        )
+
+    def _update_aggregate_lifetimes(
+        self, current_aggregates: Set[FrozenSet[int]], frame: int, time: float
+    ):
+        """Update the lifetime tracking for aggregates."""
+        # Check which active aggregates are still present
+        still_active = set()
+
+        for agg_molecules in current_aggregates:
+            if agg_molecules in self.active_aggregates:
+                # Aggregate continues to exist - update end time
+                self.active_aggregates[agg_molecules]["end_frame"] = frame
+                self.active_aggregates[agg_molecules]["end_time"] = time
+                still_active.add(agg_molecules)
+            else:
+                # New aggregate formed
+                self.active_aggregates[agg_molecules] = {
+                    "molecules": agg_molecules,
+                    "aggregation_number": len(agg_molecules),
+                    "start_frame": frame,
+                    "start_time": time,
+                    "end_frame": frame,
+                    "end_time": time,
+                }
+                still_active.add(agg_molecules)
+
+        # Move aggregates that are no longer active to completed list
+        to_remove = []
+        for agg_molecules, agg_data in self.active_aggregates.items():
+            if agg_molecules not in still_active:
+                self.completed_aggregates.append(agg_data.copy())
+                to_remove.append(agg_molecules)
+
+        # Remove completed aggregates from active tracking
+        for agg_molecules in to_remove:
+            del self.active_aggregates[agg_molecules]
+
+    def _conclude(self):
+        """Finalize analysis and create results DataFrame."""
+        # Move any remaining active aggregates to completed
+        for agg_data in self.active_aggregates.values():
+            self.completed_aggregates.append(agg_data.copy())
+
+        # Create DataFrame from completed aggregates
+        if self.completed_aggregates:
+            df_data = []
+            for i, agg_data in enumerate(self.completed_aggregates):
+                # Convert frozenset to sorted tuple for consistent indexing
+                molecules_tuple = tuple(sorted(agg_data["molecules"]))
+
+                df_data.append(
+                    {
+                        "aggregate_id": i,
+                        "molecules": molecules_tuple,
+                        "aggregation_number": agg_data["aggregation_number"],
+                        "start_frame": agg_data["start_frame"],
+                        "start_time": agg_data["start_time"],
+                        "end_frame": agg_data["end_frame"],
+                        "end_time": agg_data["end_time"],
+                        "lifetime_frames": agg_data["end_frame"]
+                        - agg_data["start_frame"]
+                        + 1,
+                        "lifetime_time": agg_data["end_time"] - agg_data["start_time"],
+                    }
+                )
+
+            self.results_df = pd.DataFrame(df_data)
+
+            # Set multi-index as requested (molecules, start_frame)
+            self.results_df = self.results_df.set_index(["molecules", "start_frame"])
+
+        else:
+            # Create empty DataFrame with proper structure
+            self.results_df = pd.DataFrame(
+                columns=[
+                    "aggregate_id",
+                    "aggregation_number",
+                    "start_time",
+                    "end_frame",
+                    "end_time",
+                    "lifetime_frames",
+                    "lifetime_time",
+                ]
+            )
+            self.results_df.index = pd.MultiIndex.from_tuples(
+                [], names=["molecules", "start_frame"]
+            )
+
+    def save_results(self, filepath: Path):
+        """Save the results DataFrame to a CSV file."""
+        self.results_df.to_csv(filepath)
+
+    @property
+    def lifetime_dataframe(self) -> pd.DataFrame:
+        """Access the results DataFrame containing aggregate lifetimes."""
+        return self.results_df
 
 
-def compute_aggregate_com(universe, aggregate_atom_indices):
-    """Compute center of mass for a set of atom indices."""
-    ag = universe.atoms[aggregate_atom_indices]
-    return ag.center_of_mass()
+def load_lifetime_dataframe(filepath: str) -> pd.DataFrame:
+    """Load aggregate lifetime DataFrame from CSV file.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the CSV file containing lifetime data
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with aggregate lifetimes, indexed by (molecules, start_frame)
+    """
+    df = pd.read_csv(filepath, index_col=[0, 1])
+    # Convert the molecules column from string representation back to tuple
+    if "molecules" in df.columns:
+        df["molecules"] = df["molecules"].apply(eval)
+    return df
+
+
+def hypersphere_center_of_mass(
+    positions: np.ndarray, box_dimensions: np.ndarray, masses: np.ndarray = None
+) -> np.ndarray:
+    """Calculate center of mass using improved hypersphere mapping to handle PBC correctly.
+
+    This method uses a two-step process:
+    1. Get initial estimate using hypersphere mapping
+    2. Translate particles using this estimate and calculate true weighted center of mass
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Shape (N, 3) array of particle positions
+    box_dimensions : np.ndarray
+        Shape (3,) array of box dimensions
+    masses : np.ndarray, optional
+        Shape (N,) array of particle masses. If None, assumes equal masses.
+
+    Returns
+    -------
+    np.ndarray
+        Shape (3,) center of mass position
+    """
+    if masses is None:
+        masses = np.ones(len(positions))
+
+    # Step 1: Get initial estimate using hypersphere mapping
+    # Map to hypersphere (convert to angular coordinates)
+    angles = 2 * np.pi * positions / box_dimensions
+
+    # Convert to unit vectors on hypersphere
+    cos_angles = np.cos(angles)
+    sin_angles = np.sin(angles)
+
+    # Average the unit vectors (weighted by mass)
+    total_mass = np.sum(masses)
+    mean_cos = np.sum(masses[:, np.newaxis] * cos_angles, axis=0) / total_mass
+    mean_sin = np.sum(masses[:, np.newaxis] * sin_angles, axis=0) / total_mass
+
+    # Convert back to angles
+    mean_angles = np.arctan2(mean_sin, mean_cos)
+
+    # Convert back to Cartesian coordinates for initial estimate
+    pseudo_com = (mean_angles * box_dimensions) / (2 * np.pi)
+    pseudo_com = np.where(pseudo_com < 0, pseudo_com + box_dimensions, pseudo_com)
+
+    # Step 2: Translate particles to center them around the pseudo-COM
+    # and calculate true center of mass
+    translated_positions = positions.copy()
+
+    for dim in range(3):
+        # Calculate displacement to pseudo-COM
+        displacement = positions[:, dim] - pseudo_com[dim]
+
+        # Apply minimum image convention to handle PBC
+        displacement = np.where(
+            displacement > box_dimensions[dim] / 2,
+            displacement - box_dimensions[dim],
+            displacement,
+        )
+        displacement = np.where(
+            displacement < -box_dimensions[dim] / 2,
+            displacement + box_dimensions[dim],
+            displacement,
+        )
+
+        # Translate to center around pseudo-COM (which becomes origin)
+        translated_positions[:, dim] = displacement
+
+    # Calculate true weighted center of mass from translated positions
+    true_com_translated = (
+        np.sum(masses[:, np.newaxis] * translated_positions, axis=0) / total_mass
+    )
+
+    # Translate back to original coordinate system
+    true_com = pseudo_com + true_com_translated
+
+    # Ensure result is within the box
+    true_com = np.mod(true_com, box_dimensions)
+
+    return true_com
+
+
+def analyze_aggregate_lifetimes(
+    trajectory_path: str,
+    structure_path: str,
+    cutoff: float = 4.25,
+    min_cluster_size: int = 5,
+    tail_selection: str = "name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
+    step: int = 1,
+    start: Optional[int] = None,
+    stop: Optional[int] = None,
+    output_path: Optional[str] = None,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Analyze aggregate lifetimes for a molecular dynamics trajectory.
+
+    Parameters
+    ----------
+    trajectory_path : str
+        Path to the trajectory file
+    structure_path : str
+        Path to the structure/topology file
+    cutoff : float, default=4.25
+        Distance cutoff for clustering (Angstroms)
+    min_cluster_size : int, default=5
+        Minimum number of molecules to define an aggregate
+    tail_selection : str
+        MDAnalysis selection string for tail atoms used in clustering
+    step : int, default=1
+        Step size for trajectory analysis
+    start : int, optional
+        Starting frame for analysis
+    stop : int, optional
+        Ending frame for analysis
+    output_path : str, optional
+        Path to save results CSV file
+    verbose : bool, default=True
+        Whether to print progress information
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with aggregate lifetimes, indexed by (molecules, start_frame)
+    """
+    # Load trajectory
+    u = mda.Universe(structure_path, trajectory_path)
+
+    # Select tail atoms for clustering
+    tailgroups = u.select_atoms(tail_selection)
+
+    if verbose:
+        print(
+            f"Selected {len(tailgroups)} tail atoms from {tailgroups.n_residues} molecules"
+        )
+        print(f"Using cutoff distance: {cutoff} Å")
+        print(f"Minimum cluster size: {min_cluster_size} molecules")
+
+    # Run lifetime analysis
+    tracker = AggregateLifetimeTracker(
+        tailgroups=tailgroups,
+        cutoff=cutoff,
+        min_cluster_size=min_cluster_size,
+        verbose=verbose,
+    )
+
+    # Handle optional parameters for MDAnalysis run method
+    if start is not None and stop is not None:
+        tracker.run(start=start, stop=stop, step=step)
+    elif start is not None:
+        tracker.run(start=start, step=step)
+    elif stop is not None:
+        tracker.run(stop=stop, step=step)
+    else:
+        tracker.run(step=step)
+
+    # Save results if output path provided
+    if output_path:
+        output_file = Path(output_path)
+        tracker.save_results(output_file)
+        if verbose:
+            print(f"Results saved to: {output_file}")
+
+    return tracker.lifetime_dataframe
+
+
+def calculate_aggregate_msd(
+    trajectory_path: str,
+    structure_path: str,
+    lifetime_df: pd.DataFrame,
+    tail_selection: str = "name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Calculate mean squared displacement for each aggregate over its lifetime.
+
+    Parameters
+    ----------
+    trajectory_path : str
+        Path to the trajectory file
+    structure_path : str
+        Path to the structure/topology file
+    lifetime_df : pd.DataFrame
+        DataFrame with aggregate lifetimes from analyze_aggregate_lifetimes
+    tail_selection : str
+        MDAnalysis selection string for tail atoms
+    verbose : bool
+        Whether to print progress information
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: aggregation_number, delta_t, msd
+    """
+    # Load trajectory
+    u = mda.Universe(structure_path, trajectory_path)
+    tailgroups = u.select_atoms(tail_selection)
+
+    # Create mapping from molecule index to residue
+    residue_mapping = {}
+    for i, residue in enumerate(tailgroups.residues.unique):
+        residue_mapping[i] = residue
+
+    msd_data = []
+
+    if verbose:
+        print(f"Calculating MSD for {len(lifetime_df)} aggregates...")
+
+    if len(lifetime_df) == 0:
+        if verbose:
+            print("Warning: No aggregate lifetime data provided")
+        return pd.DataFrame()
+
+    # Process each unique aggregate
+    for idx, (molecules_tuple, start_frame) in tqdm(
+        enumerate(lifetime_df.index),
+        desc="Processing aggregate trajectories",
+        total=len(lifetime_df.index),
+    ):
+        agg_data = lifetime_df.loc[(molecules_tuple, start_frame)]
+
+        # Get molecule indices and aggregate info
+        molecule_indices = (
+            molecules_tuple
+            if isinstance(molecules_tuple, tuple)
+            else eval(molecules_tuple)
+        )
+
+        # Extract values, handling potential Series indexing issues
+        try:
+            agg_size = int(agg_data["aggregation_number"])  # type: ignore
+            end_frame_val = int(agg_data["end_frame"])  # type: ignore
+        except (KeyError, AttributeError, IndexError, TypeError) as e:
+            if verbose:
+                print(f"Warning: Could not extract data for aggregate {idx}: {e}")
+            continue
+
+        start_frame_val = int(start_frame)
+
+        if not end_frame_val > start_frame_val:
+            # Only exists for one frame, skip
+            continue
+
+        # Get the residues for this aggregate
+        agg_residues = [residue_mapping[mol_idx] for mol_idx in molecule_indices]
+
+        # Get positions of all atoms in the aggregate
+        # Start with the first residue's atoms
+        agg_atoms = agg_residues[0].atoms
+        for residue in agg_residues[1:]:
+            agg_atoms += residue.atoms
+
+        # Calculate center of mass trajectory for this aggregate
+        com_trajectory = []
+        times = []
+
+        for frame_idx in range(start_frame_val, end_frame_val + 1):
+            u.trajectory[frame_idx]
+            dt = u.trajectory.dt
+
+            # Calculate center of mass using improved hypersphere method with masses
+            com = hypersphere_center_of_mass(
+                agg_atoms.positions, u.dimensions[:3], agg_atoms.masses
+            )
+
+            com_trajectory.append(com)
+            times.append(times[-1] + dt if times else u.trajectory.time)
+
+        com_trajectory = np.array(com_trajectory)
+        times = np.array(times)
+
+        # Calculate MSD for different delta_t values
+        n_frames = len(com_trajectory)
+
+        for dt_frames in range(1, n_frames):  # Use all available data
+            msd_values = []
+
+            for start_idx in range(n_frames - dt_frames):
+                end_idx = start_idx + dt_frames
+
+                # Calculate squared displacement
+                displacement = com_trajectory[end_idx] - com_trajectory[start_idx]
+
+                # Handle PBC for displacement
+                box_dims = u.dimensions[:3]
+                for dim in range(3):
+                    if displacement[dim] > box_dims[dim] / 2:
+                        displacement[dim] -= box_dims[dim]
+                    elif displacement[dim] < -box_dims[dim] / 2:
+                        displacement[dim] += box_dims[dim]
+
+                msd_values.append(np.sum(displacement**2))
+
+            if msd_values:  # Only add if we have valid MSD values
+                # Calculate delta_t as the time difference for dt_frames separation
+                # This should always be positive since frames are in chronological order
+                if len(times) > dt_frames:
+                    delta_t = (
+                        times[dt_frames] - times[0]
+                    )  # Time difference for this dt_frames
+                    if delta_t < 0:
+                        if verbose:
+                            print(f"Warning: Negative delta_t detected: {delta_t}")
+                            print(
+                                f"  times[0]={times[0]}, times[{dt_frames}]={times[dt_frames]}"
+                            )
+                        delta_t = abs(delta_t)
+                else:
+                    # Fallback: estimate based on timestep
+                    timestep = times[1] - times[0] if len(times) > 1 else 1.0
+                    delta_t = dt_frames * abs(timestep)
+
+                mean_msd = np.mean(msd_values)
+
+                msd_data.append(
+                    {
+                        "aggregate_id": idx,
+                        "aggregation_number": agg_size,
+                        "delta_t": delta_t,
+                        "msd": mean_msd,
+                        "n_samples": len(msd_values),
+                    }
+                )
+
+    return pd.DataFrame(msd_data)
+
+
+def estimate_diffusion_coefficients(
+    msd_df: pd.DataFrame, verbose: bool = False, filter_: bool = True
+) -> pd.DataFrame:
+    """Estimate diffusion coefficients from MSD data using Einstein relation.
+
+    D = MSD / (6 * delta_t) for 3D diffusion
+
+    Parameters
+    ----------
+    msd_df : pd.DataFrame
+        DataFrame with MSD data from calculate_aggregate_msd
+    verbose : bool
+        Whether to print debugging information
+    filter_: bool
+        Whether to filter out long and short time scales.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with diffusion coefficients by aggregate size
+    """
+    diffusion_data = []
+
+    if len(msd_df) == 0:
+        if verbose:
+            print("Warning: Empty MSD DataFrame provided")
+        return pd.DataFrame()
+
+    # Group by aggregation number
+    n_groups = len(msd_df.groupby("aggregation_number"))
+    if verbose:
+        print(f"Processing {n_groups} different aggregate sizes...")
+
+    for agg_size, group in msd_df.groupby("aggregation_number"):
+        # Only use data where delta_t is reasonably linear (not too short or long)
+        # Filter for delta_t between 1 and 1000 ps as a reasonable range
+        if filter_:
+            filtered_group = group[
+                (group["delta_t"] >= 1) & (group["delta_t"] <= TIMESCALE_CUTOFF)
+            ]
+        else:
+            filtered_group = group
+
+        if verbose:
+            print(
+                f"Size {agg_size}: {len(group)} total points, {len(filtered_group)} after filtering"
+            )
+
+        if len(filtered_group) < 5:  # Need sufficient data points
+            if verbose:
+                print(
+                    f"  Skipping size {agg_size}: insufficient data points ({len(filtered_group)} < 5)"
+                )
+            continue
+
+        # Fit linear regression: MSD = 6D * delta_t
+        # So slope = 6D, and D = slope / 6
+        try:
+            slope, intercept, r_value, p_value, std_err = stats.linregress(  # type: ignore
+                filtered_group["delta_t"].values, filtered_group["msd"].values
+            )
+
+            diffusion_coeff = slope / 6.0  # type: ignore  # Convert to diffusion coefficient
+            diffusion_err = std_err / 6.0  # type: ignore  # Error in diffusion coefficient
+
+            diffusion_data.append(
+                {
+                    "aggregation_number": agg_size,
+                    "diffusion_coefficient": diffusion_coeff,
+                    "diffusion_error": diffusion_err,
+                    "r_squared": r_value**2,  # type: ignore
+                    "p_value": p_value,
+                    "n_points": len(filtered_group),
+                }
+            )
+        except (ValueError, TypeError) as e:
+            # Skip this aggregate size if regression fails
+            print(f"Warning: Could not fit regression for size {agg_size}: {e}")
+            continue
+
+    return pd.DataFrame(diffusion_data)
+
+
+def plot_msd_analysis(
+    msd_df: pd.DataFrame,
+    diffusion_df: pd.DataFrame,
+    output_dir: str = ".",
+    show_plots: bool = True,
+    include_r_squared: bool = True,
+    filter_: bool = True,
+):
+    """Create plots for MSD analysis and diffusion coefficients.
+
+    Parameters
+    ----------
+    msd_df : pd.DataFrame
+        MSD data from calculate_aggregate_msd
+    diffusion_df : pd.DataFrame
+        Diffusion coefficient data from estimate_diffusion_coefficients
+    output_dir : str
+        Directory to save plots
+    show_plots : bool
+        Whether to display plots
+    include_r_squared : bool
+        Whether to annotate diffusion plot with R² values.
+    filter_ : bool
+        Whether to filter out long and short time scales in MSD plot.
+
+    """
+    # Set up the plotting style
+    plt.style.use("default")
+    sns.set_palette("husl")
+
+    # Plot 1: MSD vs delta_t colored by aggregate size
+    if len(msd_df) > 0:
+        plt.figure(figsize=(10, 6))
+
+        # Filter data for better visualization (limit aggregate sizes for readability)
+        # plot_data = msd_df[msd_df["aggregation_number"] <= 20]
+        if filter_:
+            plot_data = msd_df[
+                (msd_df["delta_t"] >= 1) & (msd_df["delta_t"] <= TIMESCALE_CUTOFF)
+            ]
+        else:
+            plot_data = msd_df
+
+        if len(plot_data) > 0:
+            g = sns.relplot(
+                data=plot_data,
+                x="delta_t",
+                y="msd",
+                hue="aggregation_number",
+                kind="line",
+                height=6,
+                aspect=1.5,
+                alpha=0.7,
+            )
+
+            g.set_axis_labels("Δt (ps)", "MSD (Å$^2$)")
+            g.set(yscale="log")
+            g.figure.suptitle("Mean Squared Displacement vs Time by Aggregate Size")
+            plt.tight_layout()
+
+            if output_dir:
+                plt.savefig(
+                    f"{output_dir}/msd_vs_time.png", dpi=300, bbox_inches="tight"
+                )
+            if show_plots:
+                plt.show()
+        else:
+            print("Warning: No MSD data in the specified range for plotting")
+    else:
+        print("Warning: No MSD data available for plotting")
+
+    # Plot 2: Diffusion coefficient vs aggregate size
+    if len(diffusion_df) > 0 and "aggregation_number" in diffusion_df.columns:
+        plt.figure(figsize=(8, 6))
+
+        plt.errorbar(
+            diffusion_df["aggregation_number"],
+            diffusion_df["diffusion_coefficient"],
+            yerr=diffusion_df["diffusion_error"],
+            fmt="o-",
+            capsize=5,
+            capthick=2,
+            alpha=0.8,
+        )
+
+        plt.xlabel("Aggregation Number")
+        plt.ylabel("Diffusion Coefficient (Å$^2$/ps)")
+        plt.title("Diffusion Coefficient vs Aggregate Size")
+        plt.grid(True, alpha=0.3)
+
+        if include_r_squared:
+            # Add R² values as text annotations
+            for _, row in diffusion_df.iterrows():
+                plt.annotate(
+                    f'R²={row["r_squared"]:.3f}',
+                    (row["aggregation_number"], row["diffusion_coefficient"]),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    fontsize=8,
+                )
+
+        plt.gca().set_yscale("log")
+        plt.tight_layout()
+
+        if output_dir:
+            plt.savefig(
+                f"{output_dir}/diffusion_vs_size.png", dpi=300, bbox_inches="tight"
+            )
+        if show_plots:
+            plt.show()
+    else:
+        print("Warning: No diffusion coefficient data available for plotting")
+        print("This could be due to:")
+        print("- Insufficient data points for regression analysis")
+        print("- All regression fits failed")
+        print("- Aggregates too short-lived for meaningful MSD calculation")
 
 
 def main():
+    """Command-line interface for aggregate lifetime analysis."""
+    import argparse
+
     parser = argparse.ArgumentParser(
-        description="Calculate aggregate MSD and diffusivity from trajectory and adjacency matrix."
+        description="Analyze aggregate lifetimes in molecular dynamics trajectories"
     )
-    parser.add_argument("tpr_file", type=str, help="Path to topology file (tpr)")
-    parser.add_argument("traj_file", type=str, help="Path to trajectory file")
+    parser.add_argument("trajectory", help="Path to trajectory file")
+    parser.add_argument("structure", help="Path to structure/topology file")
     parser.add_argument(
-        "adj_file", type=str, help="Path to adjacency matrix file (npz)"
+        "--cutoff",
+        "-c",
+        type=float,
+        default=4.25,
+        help="Distance cutoff for clustering (default: 4.25 Å)",
     )
+    parser.add_argument(
+        "--min-size",
+        "-m",
+        type=int,
+        default=5,
+        help="Minimum cluster size (default: 5 molecules)",
+    )
+    parser.add_argument(
+        "--tail-selection",
+        "-t",
+        default="name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
+        help="MDAnalysis selection for tail atoms",
+    )
+    parser.add_argument(
+        "--step",
+        "-s",
+        type=int,
+        default=1,
+        help="Step size for trajectory analysis (default: 1)",
+    )
+    parser.add_argument("--start", type=int, help="Starting frame")
+    parser.add_argument("--stop", type=int, help="Ending frame")
+    parser.add_argument("--output", "-o", help="Output CSV file path")
+    parser.add_argument(
+        "--quiet", "-q", action="store_true", help="Suppress progress output"
+    )
+    parser.add_argument(
+        "--load-lifetimes", "-l", help="Load existing lifetime DataFrame from CSV"
+    )
+    parser.add_argument(
+        "--msd",
+        action="store_true",
+        help="Calculate mean squared displacement and diffusion coefficients",
+    )
+    parser.add_argument(
+        "--plot", action="store_true", help="Generate plots for MSD analysis"
+    )
+    parser.add_argument(
+        "--plot-dir",
+        default=".",
+        help="Directory to save plots (default: current directory)",
+    )
+
     args = parser.parse_args()
-    tpr_file = Path(args.tpr_file)
-    traj_file = Path(args.traj_file)
-    adj_file = Path(args.adj_file)
 
-    # Load trajectory
-    u = mda.Universe(tpr_file, traj_file)
-    # Determine dt (time between frames) in picoseconds
-    dt_ps = u.trajectory.dt  # dt in ps
-    # Load adjacency matrices
-    adj_mats = load_sparse(adj_file)
-    # Map: (aggregate_size) -> list of arrays (each array: trajectory of COMs for a unique aggregate)
-    aggregate_trajs = defaultdict(list)
-    # For each aggregate size, keep track of currently active aggregates in previous frame
-    prev_aggregates = dict()  # agg_size -> list of (agg_tuple, traj_idx)
-    for frame_idx, adj_mat in tqdm(
-        sorted(adj_mats.items()), desc="Computing aggregate trajectories"
-    ):
-        u.trajectory[frame_idx]
-        aggregates = get_aggregates(adj_mat)
-        curr_agg_map = dict()  # agg_size -> list of (agg_tuple, traj_idx)
-        # For each aggregate, track its members and COM
-        for agg in aggregates:
-            agg_size = len(agg)
-            agg_tuple = tuple(sorted(agg))
-            # Check if this aggregate is a direct continuation from previous frame
-            prev_list = prev_aggregates.get(agg_size, [])
-            found = False
-            for i, (prev_tuple, traj_idx) in enumerate(prev_list):
-                if prev_tuple == agg_tuple:
-                    # Continue previous trajectory
-                    com = compute_aggregate_com(u, list(agg))
-                    aggregate_trajs[agg_size][traj_idx].append((frame_idx, com))
-                    curr_agg_map.setdefault(agg_size, []).append((agg_tuple, traj_idx))
-                    found = True
-                    break
-            if not found:
-                # Start new trajectory for this aggregate
-                com = compute_aggregate_com(u, list(agg))
-                aggregate_trajs[agg_size].append([(frame_idx, com)])
-                new_traj_idx = len(aggregate_trajs[agg_size]) - 1
-                curr_agg_map.setdefault(agg_size, []).append((agg_tuple, new_traj_idx))
-        prev_aggregates = curr_agg_map
-    # Now, for each aggregate size, compute MSD
-
-    results_list = []
-    print("Aggregate size | Time (frames) | MSD (A^2)")
-    for agg_size, trajs in aggregate_trajs.items():
-        msd_by_dt = defaultdict(list)
-        for traj in trajs:
-            if len(traj) < 2:
-                continue
-            frames, coms = zip(*traj)
-            coms = np.array(coms)
-            for dt in range(1, len(coms)):
-                displacements = coms[dt:] - coms[:-dt]
-                sq_disp = np.sum(displacements**2, axis=1)
-                msd_by_dt[dt].extend(sq_disp)
-        # Prepare arrays for regression
-        dts = []
-        msd_means = []
-        msd_stds = []
-        for dt, msds in sorted(msd_by_dt.items()):
-            mean_msd = np.mean(msds)
-            std_msd = np.std(msds)
-            dts.append(dt)
-            msd_means.append(mean_msd)
-            msd_stds.append(std_msd)
-            print(f"{agg_size:13d} | {dt:12d} | {mean_msd:10.3f}")
-        # Linear regression for diffusivity (Einstein relation: MSD = 6Dt)
-        if len(dts) > 1:
-            dts_arr = np.array(dts) * dt_ps / 1000.0  # convert to nanoseconds
-            msd_means_arr = np.array(msd_means)
-            result = linregress(dts_arr, msd_means_arr)
-            # If result is a tuple, unpack; if LinregressResult, use attributes
-            try:
-                slope = result.slope  # type:ignore
-                std_err = result.stderr  # type:ignore
-                r_value = result.rvalue  # type:ignore
-            except AttributeError:
-                slope, intercept, r_value, p_value, std_err = result
-            D = slope / 6.0  # type:ignore
-            D_err = std_err / 6.0  # type:ignore
-            r2 = r_value**2  # type:ignore
-            print(
-                f"Aggregate size {agg_size}: D = {D:.5e} +/- {D_err:.2e} (A^2/ns), R^2 = {r2:.3f}"
-            )
-            results_list.append((agg_size, D, D_err))
-    # Save results to file
-
-    df = pd.DataFrame(
-        results_list, columns=["Aggregate size", "Diffusivity (A^2/ns)", "Std error"]
-    )
-    df.to_csv("diffusivities.csv", index=False)
-    # Plot diffusivity vs aggregate size
-    if not df.empty:
-        sns.set_theme(style="whitegrid")
-        plt.errorbar(
-            df["Aggregate size"],
-            df["Diffusivity (A^2/ns)"],
-            yerr=df["Std error"],
-            fmt="o",
-            capsize=4,
-            label="Diffusivity",
+    # Load or calculate lifetime DataFrame
+    if args.load_lifetimes:
+        if not args.quiet:
+            print(f"Loading lifetime data from: {args.load_lifetimes}")
+        results_df = load_lifetime_dataframe(args.load_lifetimes)
+    else:
+        # Run analysis
+        results_df = analyze_aggregate_lifetimes(
+            trajectory_path=args.trajectory,
+            structure_path=args.structure,
+            cutoff=args.cutoff,
+            min_cluster_size=args.min_size,
+            tail_selection=args.tail_selection,
+            step=args.step,
+            start=args.start,
+            stop=args.stop,
+            output_path=args.output,
+            verbose=not args.quiet,
         )
-        plt.xlabel("Aggregate size")
-        plt.ylabel(r"Diffusivity ($\mathrm{\AA}^2$/ns)")
-        plt.title("Diffusivity vs Aggregate Size")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig("diffusivity_vs_size.png", dpi=150)
-        plt.show()
+
+    if not args.quiet:
+        print(f"\nAnalysis complete!")
+        print(f"Found {len(results_df)} unique aggregate lifetimes")
+        if len(results_df) > 0:
+            print(f"Average lifetime: {results_df['lifetime_time'].mean():.2f} ps")
+            print(f"Longest lifetime: {results_df['lifetime_time'].max():.2f} ps")
+
+            # Analyze average lifetime as a function of aggregation number
+            print(f"\nAverage lifetime by aggregation number:")
+            print("-" * 50)
+            lifetime_by_size = results_df.groupby("aggregation_number")[
+                "lifetime_time"
+            ].agg(["mean", "std", "count"])
+            lifetime_by_size = lifetime_by_size.sort_index()
+
+            print(f"{'Size':<6} {'Mean (ps)':<12} {'Std (ps)':<12} {'Count':<8}")
+            print("-" * 50)
+            for size, row in lifetime_by_size.iterrows():
+                mean_val = row["mean"]
+                std_val = row["std"] if not pd.isna(row["std"]) else 0.0
+                count_val = int(row["count"])
+                print(f"{size:<6} {mean_val:<12.2f} {std_val:<12.2f} {count_val:<8}")
+
+            # Additional statistics
+            print(f"\nAggregate size statistics:")
+            print(
+                f"Smallest aggregate: {results_df['aggregation_number'].min()} molecules"
+            )
+            print(
+                f"Largest aggregate: {results_df['aggregation_number'].max()} molecules"
+            )
+            print(
+                f"Most common size: {results_df['aggregation_number'].mode().iloc[0]} molecules"
+            )
+
+            # Show distribution of aggregate sizes
+            size_counts = results_df["aggregation_number"].value_counts().sort_index()
+            print(f"\nAggregate size distribution:")
+            print("-" * 30)
+            for size, count in size_counts.items():
+                percentage = (count / len(results_df)) * 100
+                print(f"Size {size:2d}: {count:3d} aggregates ({percentage:5.1f}%)")
+
+    # Run MSD analysis if requested
+    if args.msd:
+        if not args.quiet:
+            print(f"\nCalculating mean squared displacement...")
+
+        msd_df = calculate_aggregate_msd(
+            trajectory_path=args.trajectory,
+            structure_path=args.structure,
+            lifetime_df=results_df,
+            tail_selection=args.tail_selection,
+            verbose=not args.quiet,
+        )
+
+        # Calculate diffusion coefficients
+        if not args.quiet:
+            print(f"Estimating diffusion coefficients...")
+
+        diffusion_df = estimate_diffusion_coefficients(msd_df, verbose=not args.quiet)
+
+        # Save MSD and diffusion data
+        if args.output:
+            base_name = Path(args.output).stem
+            msd_output = f"{base_name}_msd.csv"
+            diffusion_output = f"{base_name}_diffusion.csv"
+
+            msd_df.to_csv(msd_output, index=False)
+            diffusion_df.to_csv(diffusion_output, index=False)
+
+            if not args.quiet:
+                print(f"MSD data saved to: {msd_output}")
+                print(f"Diffusion data saved to: {diffusion_output}")
+
+        # Print diffusion coefficient results
+        if not args.quiet and len(diffusion_df) > 0:
+            print(f"\nDiffusion coefficients by aggregate size:")
+            print("-" * 70)
+            print(
+                f"{'Size':<6} {'D (Å$^2$/ps)':<12} {'Error':<12} {'R²':<8} {'N points':<8}"
+            )
+            print("-" * 70)
+            for _, row in diffusion_df.iterrows():
+                print(
+                    f"{int(row['aggregation_number']):<6} "
+                    f"{row['diffusion_coefficient']:<12.4f} "
+                    f"{row['diffusion_error']:<12.4f} "
+                    f"{row['r_squared']:<8.3f} "
+                    f"{int(row['n_points']):<8}"
+                )
+
+        # Generate plots if requested
+        if args.plot:
+            if not args.quiet:
+                print(f"\nGenerating plots...")
+
+            plot_msd_analysis(
+                msd_df=msd_df,
+                diffusion_df=diffusion_df,
+                output_dir=args.plot_dir,
+                show_plots=not args.quiet,
+            )
+
+            if not args.quiet:
+                print(f"Plots saved to: {args.plot_dir}")
 
 
 if __name__ == "__main__":
