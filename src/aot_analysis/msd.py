@@ -409,6 +409,10 @@ def calculate_aggregate_msd(
 ) -> pd.DataFrame:
     """Calculate mean squared displacement for each aggregate over its lifetime.
 
+    Uses a sliding window approach to calculate MSD within TIMESCALE_CUTOFF
+    windows throughout each aggregate's lifetime, maximizing data utilization
+    while avoiding artifacts from very long time scales.
+
     Parameters
     ----------
     trajectory_path : str
@@ -504,12 +508,24 @@ def calculate_aggregate_msd(
         com_trajectory = np.array(com_trajectory)
         times = np.array(times)
 
-        # Calculate MSD for different delta_t values
+        # Get the trajectory timestep
+        timestep = u.trajectory.dt
+
+        # Calculate maximum frames that fit within TIMESCALE_CUTOFF
+        max_dt_frames = (
+            int(TIMESCALE_CUTOFF / abs(timestep))
+            if timestep != 0
+            else len(com_trajectory) - 1
+        )
+
+        # Use sliding windows within TIMESCALE_CUTOFF duration
         n_frames = len(com_trajectory)
 
-        for dt_frames in range(1, n_frames):  # Use all available data
+        # Calculate MSD using sliding windows approach
+        for dt_frames in range(1, min(max_dt_frames + 1, n_frames)):
             msd_values = []
 
+            # Use sliding windows throughout the trajectory
             for start_idx in range(n_frames - dt_frames):
                 end_idx = start_idx + dt_frames
 
@@ -527,23 +543,8 @@ def calculate_aggregate_msd(
                 msd_values.append(np.sum(displacement**2))
 
             if msd_values:  # Only add if we have valid MSD values
-                # Calculate delta_t as the time difference for dt_frames separation
-                # This should always be positive since frames are in chronological order
-                if len(times) > dt_frames:
-                    delta_t = (
-                        times[dt_frames] - times[0]
-                    )  # Time difference for this dt_frames
-                    if delta_t < 0:
-                        if verbose:
-                            print(f"Warning: Negative delta_t detected: {delta_t}")
-                            print(
-                                f"  times[0]={times[0]}, times[{dt_frames}]={times[dt_frames]}"
-                            )
-                        delta_t = abs(delta_t)
-                else:
-                    # Fallback: estimate based on timestep
-                    timestep = times[1] - times[0] if len(times) > 1 else 1.0
-                    delta_t = dt_frames * abs(timestep)
+                # Calculate actual delta_t for this dt_frames separation
+                delta_t = dt_frames * abs(timestep)
 
                 mean_msd = np.mean(msd_values)
 
@@ -568,7 +569,8 @@ def estimate_diffusion_coefficients(
     D = MSD / (6 * delta_t) for 3D diffusion
 
     Uses weighted least squares regression with weights = 1/var(MSD) to account
-    for increasing variance at longer time scales.
+    for increasing variance at longer time scales. MSD data is already constrained
+    to reasonable time scales by the sliding window approach in calculate_aggregate_msd.
 
     Parameters
     ----------
@@ -577,7 +579,7 @@ def estimate_diffusion_coefficients(
     verbose : bool
         Whether to print debugging information
     filter_: bool
-        Whether to filter out long and short time scales.
+        Whether to apply additional filtering for time scales (mainly for fine-tuning)
 
     Returns
     -------
@@ -597,8 +599,8 @@ def estimate_diffusion_coefficients(
         print(f"Processing {n_groups} different aggregate sizes...")
 
     for agg_size, group in msd_df.groupby("aggregation_number"):
-        # Only use data where delta_t is reasonably linear (not too short or long)
-        # Filter for delta_t between 1 and 1000 ps as a reasonable range
+        # Additional filtering for time scales where diffusion behavior is expected to be linear
+        # MSD calculation already limits delta_t to TIMESCALE_CUTOFF, but this allows fine-tuning
         if filter_:
             filtered_group = group[
                 (group["delta_t"] >= 1) & (group["delta_t"] <= TIMESCALE_CUTOFF)
@@ -808,7 +810,7 @@ def plot_msd_analysis(
     diffusion_df: pd.DataFrame,
     output_dir: str = ".",
     show_plots: bool = True,
-    include_r_squared: bool = True,
+    include_r_squared: bool = False,
     filter_: bool = True,
 ):
     """Create plots for MSD analysis and diffusion coefficients.
