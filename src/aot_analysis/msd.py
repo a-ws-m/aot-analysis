@@ -1120,6 +1120,7 @@ def plot_radius_of_gyration_analysis(
     diffusion_df: Optional[pd.DataFrame] = None,
     output_dir: str = ".",
     show_plots: bool = True,
+    rg_exponent: float = 2.0,
 ):
     """Create plots for radius of gyration analysis.
 
@@ -1133,6 +1134,8 @@ def plot_radius_of_gyration_analysis(
         Directory to save plots
     show_plots : bool
         Whether to display plots
+    rg_exponent : float, default=3.0
+        Exponent for the inverse relationship fit: D = a + b * Rg^(-exponent)
     """
     # Set up the plotting style
     plt.style.use("default")
@@ -1165,7 +1168,7 @@ def plot_radius_of_gyration_analysis(
         if show_plots:
             plt.show()
 
-    # Plot 2: Diffusion coefficient vs radius of gyration with inverse cubic fit
+    # Plot 2: Diffusion coefficient vs radius of gyration with inverse power fit
     if diffusion_df is not None and len(diffusion_df) > 0 and len(rg_df) > 0:
         # Merge the dataframes on aggregation number
         merged_df = pd.merge(diffusion_df, rg_df, on="aggregation_number", how="inner")
@@ -1192,8 +1195,8 @@ def plot_radius_of_gyration_analysis(
                 label="Data",
             )
 
-            # Fit inverse cubic relationship: D = a / Rg^3
-            # Use log-log regression: log(D) = log(a) - 3*log(Rg)
+            # Fit inverse power relationship: D = a + b * Rg^(-exponent)
+            # Use OLS regression with transformed variables
             if len(merged_df) >= 3:  # Need at least 3 points for fitting
                 try:
                     rg_values = np.array(merged_df["radius_of_gyration_avg"])
@@ -1207,41 +1210,54 @@ def plot_radius_of_gyration_analysis(
                         rg_fit = rg_values[valid_mask]
                         d_fit = d_values[valid_mask]
 
-                        # Log-log regression
-                        log_rg = np.log(rg_fit)
-                        log_d = np.log(d_fit)
+                        # Create feature matrix: X = [1, Rg^(-exponent)]
+                        rg_inv_power = rg_fit ** (-rg_exponent)
+                        X = np.column_stack([np.ones(len(rg_fit)), rg_inv_power])
 
-                        # Fit: log(D) = log(a) - 3*log(Rg)
-                        X_fit = np.column_stack([np.ones(len(log_rg)), log_rg])
-                        coeffs = np.linalg.lstsq(X_fit, log_d, rcond=None)[0]
-                        log_a, slope = coeffs
+                        # Fit using OLS: D = a + b * Rg^(-exponent)
+                        model = LinearRegression()
+                        model.fit(X, d_fit)
 
-                        # Calculate R-squared
-                        log_d_pred = log_a + slope * log_rg
-                        ss_res = np.sum((log_d - log_d_pred) ** 2)
-                        ss_tot = np.sum((log_d - np.mean(log_d)) ** 2)
-                        r_squared = 1 - (ss_res / ss_tot)
+                        # Get coefficients
+                        a, b = model.intercept_, model.coef_[1]
 
-                        # Generate fitted curve
+                        # Calculate predictions and R-squared
+                        d_pred = model.predict(X)
+                        r_squared = r2_score(d_fit, d_pred)
+
+                        # Generate fitted curve for plotting
                         rg_range = np.linspace(rg_fit.min(), rg_fit.max(), 100)
-                        d_fitted = np.exp(log_a) * (rg_range**slope)
+                        rg_inv_power_range = rg_range ** (-rg_exponent)
+                        X_range = np.column_stack(
+                            [np.ones(len(rg_range)), rg_inv_power_range]
+                        )
+                        d_fitted = model.predict(X_range)
                         d_fitted_si = d_fitted * 1e-8  # Convert to m²/s for plotting
+
+                        # Format exponent for display
+                        exp_str = (
+                            f"{rg_exponent:g}"  # Use :g to avoid unnecessary decimals
+                        )
 
                         plt.plot(
                             rg_range,
                             d_fitted_si,
                             "r-",
                             linewidth=2,
-                            label=f"Fit: D ∝ Rg^{slope:.2f} (R² = {r_squared:.3f})",
+                            label=f"Fit: D = {a*1e-8:.2e} + {b*1e-8:.2e}/Rg$^{{{exp_str}}}$ (R² = {r_squared:.3f})",
                         )
 
-                        print(f"Inverse relationship fit:")
-                        print(f"  D = {np.exp(log_a):.2e} * Rg^{slope:.2f} (Å²/ps)")
+                        print(
+                            f"Inverse power relationship fit (exponent = {rg_exponent}):"
+                        )
+                        print(f"  D = {a:.2e} + {b:.2e} * Rg^(-{rg_exponent}) (Å²/ps)")
+                        print(
+                            f"  D = {a*1e-8:.2e} + {b*1e-8:.2e} * Rg^(-{rg_exponent}) (m²/s)"
+                        )
                         print(f"  R² = {r_squared:.3f}")
-                        print(f"  Expected slope for D ∝ 1/Rg³: -3.0")
 
                 except Exception as e:
-                    print(f"Warning: Could not fit inverse cubic relationship: {e}")
+                    print(f"Warning: Could not fit inverse power relationship: {e}")
 
             plt.xlabel("Radius of Gyration (Å)")
             plt.ylabel("Diffusion Coefficient (m²/s)")
@@ -1326,6 +1342,12 @@ def main():
         action="store_true",
         dest="rog",
         help="Calculate radius of gyration for aggregates by size",
+    )
+    parser.add_argument(
+        "--rog-exponent",
+        type=float,
+        default=2.0,
+        help="Exponent for inverse relationship fit: D = a + b * Rg^(-exponent) (default: 2.0)",
     )
     parser.add_argument(
         "--plot", action="store_true", help="Generate plots for SD analysis"
@@ -1550,6 +1572,7 @@ def main():
                 diffusion_df=diffusion_df_for_rog,
                 output_dir=args.plot_dir,
                 show_plots=not args.quiet,
+                rg_exponent=args.rog_exponent,
             )
 
             if not args.quiet:
