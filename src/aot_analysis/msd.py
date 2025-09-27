@@ -16,9 +16,9 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from MDAnalysis.analysis.base import AnalysisBase
-from scipy import stats
+from scipy.constants import k as k_B
 from scipy.sparse.csgraph import connected_components
-from sklearn.linear_model import HuberRegressor, LinearRegression
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from tqdm import tqdm
 
@@ -800,7 +800,7 @@ def plot_sd_fit(
     diffusion_coeff = size_diffusion.iloc[0]["diffusion_coefficient"]
 
     # Create the plot
-    plt.figure(figsize=(12, 8))
+    plt.figure()
 
     # Create violin plot to show the distribution of SD values at each time point
     sns.violinplot(
@@ -836,7 +836,6 @@ def plot_sd_fit(
     plt.ylabel("SD (Å²)")
     plt.title(f"SD Distribution vs Time for Aggregate Size {aggregate_size}")
     plt.legend()
-    plt.grid(True, alpha=0.3)
 
     # Add R² annotation
     plt.text(
@@ -853,7 +852,7 @@ def plot_sd_fit(
     # Save plot
     if output_dir:
         plt.savefig(
-            f"{output_dir}/sd_fit_size_{aggregate_size}.png",
+            f"{output_dir}/sd_fit_size_{aggregate_size}.pdf",
             dpi=300,
             bbox_inches="tight",
         )
@@ -888,13 +887,9 @@ def plot_sd_analysis(
         Whether to filter out long and short time scales in SD plot.
 
     """
-    # Set up the plotting style
-    plt.style.use("default")
-    sns.set_palette("husl")
-
     # Plot 1: SD vs delta_t colored by aggregate size
     if len(sd_df) > 0:
-        plt.figure(figsize=(10, 6))
+        plt.figure()
 
         # Filter data for better visualization (limit aggregate sizes for readability)
         # plot_data = sd_df[sd_df["aggregation_number"] <= 20]
@@ -924,7 +919,7 @@ def plot_sd_analysis(
 
             if output_dir:
                 plt.savefig(
-                    f"{output_dir}/sd_vs_time.png", dpi=300, bbox_inches="tight"
+                    f"{output_dir}/sd_vs_time.pdf", dpi=300, bbox_inches="tight"
                 )
             if show_plots:
                 plt.show()
@@ -935,7 +930,7 @@ def plot_sd_analysis(
 
     # Plot 2: Diffusion coefficient vs aggregate size
     if len(diffusion_df) > 0 and "aggregation_number" in diffusion_df.columns:
-        plt.figure(figsize=(8, 6))
+        plt.figure()
 
         # Convert diffusion coefficients to m²/s for display
         diffusion_coeff_si = (
@@ -976,7 +971,7 @@ def plot_sd_analysis(
 
         if output_dir:
             plt.savefig(
-                f"{output_dir}/diffusion_vs_size.png", dpi=300, bbox_inches="tight"
+                f"{output_dir}/diffusion_vs_size.pdf", dpi=300, bbox_inches="tight"
             )
         if show_plots:
             plt.show()
@@ -1332,16 +1327,14 @@ def plot_hydrodynamic_radius_analysis(
     two_regime : bool, default=False
         If True, fit a two-regime Stokes-Einstein relationship
     """
-    # Set up the plotting style
-    plt.style.use("default")
-    sns.set_palette("husl")
-
-    # Constants for viscosity calculation
-    k_B = 1.380649e-23  # Boltzmann constant in J/K
+    # Plot options
+    sns.set_palette("Dark2")
 
     # Plot 1: Hydrodynamic radius vs aggregation number
     if len(rh_df) > 0:
-        plt.figure(figsize=(8, 6))
+        plt.figure()
+
+        rh_df.sort_values(by="aggregation_number", inplace=True)
 
         plt.errorbar(
             rh_df["aggregation_number"],
@@ -1357,12 +1350,11 @@ def plot_hydrodynamic_radius_analysis(
         plt.xlabel("Aggregation Number")
         plt.ylabel("Hydrodynamic Radius (Å)")
         plt.title("Hydrodynamic Radius vs Aggregate Size")
-        plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
 
         if output_dir:
-            plt.savefig(f"{output_dir}/rh_vs_size.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"{output_dir}/rh_vs_size.pdf", dpi=300, bbox_inches="tight")
         if show_plots:
             plt.show()
 
@@ -1372,16 +1364,13 @@ def plot_hydrodynamic_radius_analysis(
         merged_df = pd.merge(diffusion_df, rh_df, on="aggregation_number", how="inner")
 
         if len(merged_df) > 0:
-            plt.figure(figsize=(10, 6))
+            plt.figure()
 
             # Convert diffusion coefficients to m²/s for display
             diffusion_coeff_si = (
                 merged_df["diffusion_coefficient"] * 1e-8
             )  # Å²/ps to m²/s
             diffusion_error_si = merged_df["diffusion_error"] * 1e-8  # Å²/ps to m²/s
-
-            # Convert hydrodynamic radius to meters for viscosity calculation
-            rh_m = merged_df["hydrodynamic_radius_avg"] * 1e-10  # Å to m
 
             # Plot data points with error bars
             plt.errorbar(
@@ -1392,7 +1381,7 @@ def plot_hydrodynamic_radius_analysis(
                 fmt="o",
                 capsize=5,
                 capthick=2,
-                alpha=0.8,
+                alpha=0.6,
                 label="Data",
             )
 
@@ -1441,9 +1430,6 @@ def plot_hydrodynamic_radius_analysis(
                                 r_squared = fit_result["r_squared"]
                                 n_low = fit_result["n_points_low"]
                                 n_high = fit_result["n_points_high"]
-
-                                # Calculate viscosities for both regimes
-                                k_B = 1.380649e-23  # Boltzmann constant in J/K
 
                                 # Regime 1 (small R_H): D = A_1/R_H + B, effective η from A_1
                                 eta_1 = k_B * temperature / (6 * np.pi * A_1)
@@ -1497,7 +1483,7 @@ def plot_hydrodynamic_radius_analysis(
                                     plt.plot(
                                         rh_range[mask_low],
                                         d_theory_low[mask_low],
-                                        "r-",
+                                        "-",
                                         linewidth=2,
                                         label=f"Regime 1: η₁ = {eta_1*1000:.2f} ± {eta_1_err*1000:.2f} mPa·s",
                                     )
@@ -1506,7 +1492,7 @@ def plot_hydrodynamic_radius_analysis(
                                     plt.plot(
                                         rh_range[mask_high],
                                         d_theory_high[mask_high],
-                                        "b-",
+                                        "-",
                                         linewidth=2,
                                         label=f"Regime 2: η₂ = {eta_2*1000:.2f} ± {eta_2_err*1000:.2f} mPa·s",
                                     )
@@ -1593,7 +1579,6 @@ def plot_hydrodynamic_radius_analysis(
                             # For classical Stokes-Einstein: D = k_BT/(6πηR_H), so A = k_BT/(6πη)
                             # Even if exponent ≠ -1, we can still estimate an "effective" viscosity
                             # using the fitted A value at some reference radius
-                            k_B = 1.380649e-23  # Boltzmann constant in J/K
                             if abs(exponent + 1) < 0.1:  # Close to classical exponent
                                 eta_fitted = k_B * temperature / (6 * np.pi * A)
                                 eta_std_err = (
@@ -1632,7 +1617,7 @@ def plot_hydrodynamic_radius_analysis(
                             plt.plot(
                                 rh_range,
                                 d_theory_si,
-                                "r-",
+                                "-",
                                 linewidth=2,
                                 label=fit_label,
                             )
@@ -1661,7 +1646,6 @@ def plot_hydrodynamic_radius_analysis(
             plt.xlabel("Hydrodynamic Radius (Å)")
             plt.ylabel("Diffusion Coefficient (m²/s)")
             plt.title("Diffusion Coefficient vs Hydrodynamic Radius")
-            plt.grid(True, alpha=0.3)
             plt.legend()
             # plt.yscale("log")
             # plt.xscale("log")
@@ -1669,7 +1653,7 @@ def plot_hydrodynamic_radius_analysis(
 
             if output_dir:
                 plt.savefig(
-                    f"{output_dir}/diffusion_vs_rh.png", dpi=300, bbox_inches="tight"
+                    f"{output_dir}/diffusion_vs_rh.pdf", dpi=300, bbox_inches="tight"
                 )
             if show_plots:
                 plt.show()
@@ -1689,7 +1673,7 @@ def main():
     """Command-line interface for aggregate lifetime analysis."""
     import argparse
 
-    sns.set_theme(context="talk", style="whitegrid")
+    sns.set_theme(context="notebook", style="white")
 
     parser = argparse.ArgumentParser(
         description="Analyze aggregate lifetimes in molecular dynamics trajectories"
