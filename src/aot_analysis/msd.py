@@ -1748,6 +1748,47 @@ def plot_hydrodynamic_radius_analysis(
         )
 
 
+def get_dataframe_paths(base_name: str) -> dict:
+    """Get standardized paths for all dataframe types."""
+    return {
+        'lifetimes': f"{base_name}-lifetimes.csv",
+        'sd': f"{base_name}-sd.csv", 
+        'diffusion': f"{base_name}-diffusion.csv",
+        'rh': f"{base_name}-rh.csv"
+    }
+
+
+def load_existing_dataframes(paths: dict, verbose: bool = True) -> dict:
+    """Load existing dataframes from disk if available."""
+    dataframes = {}
+    
+    # Check for lifetime data
+    if Path(paths['lifetimes']).exists():
+        if verbose:
+            print(f"Loading existing lifetime data from: {paths['lifetimes']}")
+        dataframes['lifetimes'] = load_lifetime_dataframe(paths['lifetimes'])
+    
+    # Check for SD data
+    if Path(paths['sd']).exists():
+        if verbose:
+            print(f"Loading existing SD data from: {paths['sd']}")
+        dataframes['sd'] = pd.read_csv(paths['sd'])
+    
+    # Check for diffusion data
+    if Path(paths['diffusion']).exists():
+        if verbose:
+            print(f"Loading existing diffusion data from: {paths['diffusion']}")
+        dataframes['diffusion'] = pd.read_csv(paths['diffusion'])
+    
+    # Check for hydrodynamic radius data
+    if Path(paths['rh']).exists():
+        if verbose:
+            print(f"Loading existing hydrodynamic radius data from: {paths['rh']}")
+        dataframes['rh'] = pd.read_csv(paths['rh'])
+    
+    return dataframes
+
+
 def main():
     """Command-line interface for aggregate lifetime analysis."""
     import argparse
@@ -1790,10 +1831,19 @@ def main():
     parser.add_argument("--stop", type=int, help="Ending frame")
     parser.add_argument("--output", "-o", help="Output CSV file path")
     parser.add_argument(
+        "--base-name", "-b", 
+        default="analysis",
+        help="Base name for output files (default: 'analysis'). Files will be saved as '<base-name>-<type>.csv'"
+    )
+    parser.add_argument(
         "--quiet", "-q", action="store_true", help="Suppress progress output"
     )
     parser.add_argument(
         "--load-lifetimes", "-l", help="Load existing lifetime DataFrame from CSV"
+    )
+    parser.add_argument(
+        "--force-recalculate", "-f", action="store_true", 
+        help="Force recalculation even if existing data files are found"
     )
     parser.add_argument(
         "--msd",
@@ -1851,14 +1901,26 @@ def main():
     )
 
     args = parser.parse_args()
-
+    
+    # Get standardized file paths
+    dataframe_paths = get_dataframe_paths(args.base_name)
+    
+    # Load existing dataframes if available and not forcing recalculation
+    existing_data = {}
+    if not args.force_recalculate:
+        existing_data = load_existing_dataframes(dataframe_paths, verbose=not args.quiet)
+    
     # Load or calculate lifetime DataFrame
     if args.load_lifetimes:
         if not args.quiet:
             print(f"Loading lifetime data from: {args.load_lifetimes}")
         results_df = load_lifetime_dataframe(args.load_lifetimes)
+    elif 'lifetimes' in existing_data and not args.force_recalculate:
+        results_df = existing_data['lifetimes']
     else:
         # Run analysis
+        if not args.quiet:
+            print(f"Calculating aggregate lifetimes...")
         results_df = analyze_aggregate_lifetimes(
             trajectory_path=args.trajectory,
             structure_path=args.structure,
@@ -1868,9 +1930,20 @@ def main():
             step=args.step,
             start=args.start,
             stop=args.stop,
-            output_path=args.output,
+            output_path=None,  # We'll save with our own naming scheme
             verbose=not args.quiet,
         )
+        
+        # Save lifetime data
+        results_df.to_csv(dataframe_paths['lifetimes'])
+        if not args.quiet:
+            print(f"Lifetime data saved to: {dataframe_paths['lifetimes']}")
+        
+        # Also save to the legacy output path if specified
+        if args.output:
+            results_df.to_csv(args.output)
+            if not args.quiet:
+                print(f"Lifetime data also saved to: {args.output}")
 
     if not args.quiet:
         print(f"\nAnalysis complete!")
@@ -1916,39 +1989,54 @@ def main():
                 print(f"Size {size:2d}: {count:3d} aggregates ({percentage:5.1f}%)")
 
     # Initialize variables for optional analyses
+    sd_df = pd.DataFrame()
     diffusion_df = pd.DataFrame()
 
     # Run SD analysis if requested
     if args.msd:
-        if not args.quiet:
-            print(f"\nCalculating squared displacement...")
+        # Check if we can load existing SD and diffusion data
+        if ('sd' in existing_data and 'diffusion' in existing_data and 
+            not args.force_recalculate):
+            sd_df = existing_data['sd']
+            diffusion_df = existing_data['diffusion']
+        else:
+            if not args.quiet:
+                print(f"\nCalculating squared displacement...")
 
-        sd_df = calculate_aggregate_sd(
-            trajectory_path=args.trajectory,
-            structure_path=args.structure,
-            lifetime_df=results_df,
-            tail_selection=args.tail_selection,
-            verbose=not args.quiet,
-        )
+            sd_df = calculate_aggregate_sd(
+                trajectory_path=args.trajectory,
+                structure_path=args.structure,
+                lifetime_df=results_df,
+                tail_selection=args.tail_selection,
+                verbose=not args.quiet,
+            )
 
-        # Calculate diffusion coefficients
-        if not args.quiet:
-            print(f"Estimating diffusion coefficients...")
+            # Calculate diffusion coefficients
+            if not args.quiet:
+                print(f"Estimating diffusion coefficients...")
 
-        diffusion_df = estimate_diffusion_coefficients(sd_df, verbose=not args.quiet)
+            diffusion_df = estimate_diffusion_coefficients(sd_df, verbose=not args.quiet)
 
-        # Save SD and diffusion data
-        if args.output:
-            base_name = Path(args.output).stem
-            sd_output = f"{base_name}_sd.csv"
-            diffusion_output = f"{base_name}_diffusion.csv"
-
-            sd_df.to_csv(sd_output, index=False)
-            diffusion_df.to_csv(diffusion_output, index=False)
+            # Save SD and diffusion data
+            sd_df.to_csv(dataframe_paths['sd'], index=False)
+            diffusion_df.to_csv(dataframe_paths['diffusion'], index=False)
 
             if not args.quiet:
-                print(f"SD data saved to: {sd_output}")
-                print(f"Diffusion data saved to: {diffusion_output}")
+                print(f"SD data saved to: {dataframe_paths['sd']}")
+                print(f"Diffusion data saved to: {dataframe_paths['diffusion']}")
+            
+            # Also save to legacy format if output path specified
+            if args.output:
+                base_name = Path(args.output).stem
+                sd_output = f"{base_name}_sd.csv"
+                diffusion_output = f"{base_name}_diffusion.csv"
+
+                sd_df.to_csv(sd_output, index=False)
+                diffusion_df.to_csv(diffusion_output, index=False)
+
+                if not args.quiet:
+                    print(f"SD data also saved to: {sd_output}")
+                    print(f"Diffusion data also saved to: {diffusion_output}")
 
         # Print diffusion coefficient results
         if not args.quiet and len(diffusion_df) > 0:
@@ -2001,29 +2089,42 @@ def main():
             if not args.quiet:
                 print(f"SD fit plot saved to: {args.plot_dir}")
 
+    # Initialize hydrodynamic radius DataFrame
+    rh_df = pd.DataFrame()
+    
     # Run hydrodynamic radius analysis if requested
     if args.rh:
-        if not args.quiet:
-            print(f"\nCalculating hydrodynamic radius...")
+        # Check if we can load existing hydrodynamic radius data
+        if 'rh' in existing_data and not args.force_recalculate:
+            rh_df = existing_data['rh']
+        else:
+            if not args.quiet:
+                print(f"\nCalculating hydrodynamic radius...")
 
-        rh_df = calculate_aggregate_hydrodynamic_radius(
-            trajectory_path=args.trajectory,
-            structure_path=args.structure,
-            lifetime_df=results_df,
-            tail_selection=args.tail_selection,
-            use_rpy=not args.use_oseen,  # RPY is default, Oseen if flag is set
-            verbose=not args.quiet,
-        )
+            rh_df = calculate_aggregate_hydrodynamic_radius(
+                trajectory_path=args.trajectory,
+                structure_path=args.structure,
+                lifetime_df=results_df,
+                tail_selection=args.tail_selection,
+                use_rpy=not args.use_oseen,  # RPY is default, Oseen if flag is set
+                verbose=not args.quiet,
+            )
 
-        # Save hydrodynamic radius data
-        if args.output:
-            base_name = Path(args.output).stem
-            rh_output = f"{base_name}_rh.csv"
-
-            rh_df.to_csv(rh_output, index=False)
+            # Save hydrodynamic radius data
+            rh_df.to_csv(dataframe_paths['rh'], index=False)
 
             if not args.quiet:
-                print(f"Hydrodynamic radius data saved to: {rh_output}")
+                print(f"Hydrodynamic radius data saved to: {dataframe_paths['rh']}")
+            
+            # Also save to legacy format if output path specified
+            if args.output:
+                base_name = Path(args.output).stem
+                rh_output = f"{base_name}_rh.csv"
+
+                rh_df.to_csv(rh_output, index=False)
+
+                if not args.quiet:
+                    print(f"Hydrodynamic radius data also saved to: {rh_output}")
 
         # Print hydrodynamic radius results
         if not args.quiet and len(rh_df) > 0:
