@@ -18,7 +18,7 @@ import seaborn as sns
 from MDAnalysis.analysis.base import AnalysisBase
 from scipy import stats
 from scipy.sparse.csgraph import connected_components
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import HuberRegressor, LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from tqdm import tqdm
 
@@ -1262,6 +1262,7 @@ def plot_hydrodynamic_radius_analysis(
     output_dir: str = ".",
     show_plots: bool = True,
     temperature: float = 298.15,  # K
+    fix_exponent: bool = False,
 ):
     """Create plots for hydrodynamic radius analysis and calculate effective viscosity.
 
@@ -1277,6 +1278,8 @@ def plot_hydrodynamic_radius_analysis(
         Whether to display plots
     temperature : float, default=298.15
         Temperature in Kelvin for viscosity calculation
+    fix_exponent : bool, default=False
+        If True, fix the Stokes-Einstein exponent to -1 and use HuberRegressor for outlier handling
     """
     # Set up the plotting style
     plt.style.use("default")
@@ -1362,39 +1365,90 @@ def plot_hydrodynamic_radius_analysis(
                         rh_fit_m = rh_values_m[valid_mask]
                         d_fit_si = d_values_si[valid_mask]
 
-                        # Log-linear regression: log(D) = log(A) + n * log(R_H)
-                        X = np.log(rh_fit_m).reshape(-1, 1)  # log(R_H)
-                        y = np.log(d_fit_si)  # log(D)
+                        if fix_exponent:
+                            # Fixed exponent case: D = A / R_H (exponent = -1)
+                            # Transform to: D * R_H = A
+                            # Use log space: log(D * R_H) = log(A)
 
-                        # Fit the linear model in log space
-                        regressor = LinearRegression(fit_intercept=True)
-                        regressor.fit(X, y)
+                            y_transformed = np.log(d_fit_si * rh_fit_m)  # log(D * R_H)
 
-                        # Get the slope (exponent) and intercept
-                        exponent = regressor.coef_[0]  # This is n in D = A * R_H^n
-                        log_A = regressor.intercept_  # This is log(A)
-                        A = np.exp(log_A)  # Convert back to linear scale
+                            # Use HuberRegressor for robust fitting (no X needed for constant fit)
+                            # We're fitting a constant: log(D * R_H) = log(A)
+                            regressor = HuberRegressor(fit_intercept=True, alpha=0.0)
+                            X_dummy = np.zeros(
+                                (len(y_transformed), 1)
+                            )  # Dummy variable for constant fit
+                            regressor.fit(X_dummy, y_transformed)
 
-                        # Calculate R² score in log space
-                        y_pred_log = regressor.predict(X)
-                        r_squared = r2_score(y, y_pred_log)
+                            # Get the fitted constant (log(A))
+                            log_A = regressor.intercept_
+                            A = np.exp(log_A)
+                            exponent = -1.0  # Fixed exponent
 
-                        # Calculate standard errors
-                        residuals = y - y_pred_log
-                        mse = np.mean(residuals**2)
-                        X_centered = X - np.mean(X)
-                        exponent_variance = mse / np.sum(X_centered**2)
-                        exponent_std_err = np.sqrt(exponent_variance)
+                            # Calculate R² using only inliers
+                            inlier_mask = ~regressor.outliers_
+                            y_inliers = y_transformed[inlier_mask]
+                            y_pred_inliers = np.full_like(y_inliers, log_A)
+                            r_squared = (
+                                r2_score(y_inliers, y_pred_inliers)
+                                if len(y_inliers) > 1
+                                else 0.0
+                            )
 
-                        # Standard error for log_A (intercept)
-                        n_points = len(X)
-                        log_A_variance = mse * (
-                            1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2)
-                        )
-                        log_A_std_err = np.sqrt(log_A_variance)
+                            # Calculate standard errors using only inliers
+                            n_inliers = np.sum(inlier_mask)
+                            if n_inliers > 1:
+                                residuals_inliers = y_inliers - log_A
+                                mse_inliers = np.mean(residuals_inliers**2)
+                                log_A_std_err = np.sqrt(mse_inliers / n_inliers)
+                                A_std_err = A * log_A_std_err
+                                exponent_std_err = 0.0  # Fixed, so no uncertainty
+                            else:
+                                log_A_std_err = 0.0
+                                A_std_err = 0.0
+                                exponent_std_err = 0.0
 
-                        # Propagate uncertainty to A
-                        A_std_err = A * log_A_std_err
+                            print(
+                                f"Fixed Stokes-Einstein fit results (n={n_inliers} inliers, {np.sum(~inlier_mask)} outliers):"
+                            )
+
+                        else:
+                            # Variable exponent case: D = A * R_H^n
+                            # Log-linear regression: log(D) = log(A) + n * log(R_H)
+                            X = np.log(rh_fit_m).reshape(-1, 1)  # log(R_H)
+                            y = np.log(d_fit_si)  # log(D)
+
+                            # Fit the linear model in log space
+                            regressor = LinearRegression(fit_intercept=True)
+                            regressor.fit(X, y)
+
+                            # Get the slope (exponent) and intercept
+                            exponent = regressor.coef_[0]  # This is n in D = A * R_H^n
+                            log_A = regressor.intercept_  # This is log(A)
+                            A = np.exp(log_A)  # Convert back to linear scale
+
+                            # Calculate R² score in log space
+                            y_pred_log = regressor.predict(X)
+                            r_squared = r2_score(y, y_pred_log)
+
+                            # Calculate standard errors
+                            residuals = y - y_pred_log
+                            mse = np.mean(residuals**2)
+                            X_centered = X - np.mean(X)
+                            exponent_variance = mse / np.sum(X_centered**2)
+                            exponent_std_err = np.sqrt(exponent_variance)
+
+                            # Standard error for log_A (intercept)
+                            n_points = len(X)
+                            log_A_variance = mse * (
+                                1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2)
+                            )
+                            log_A_std_err = np.sqrt(log_A_variance)
+
+                            # Propagate uncertainty to A
+                            A_std_err = A * log_A_std_err
+
+                            print(f"Modified Stokes-Einstein fit results:")
 
                         # Calculate effective viscosity even with modified exponent
                         # For classical Stokes-Einstein: D = k_BT/(6πηR_H), so A = k_BT/(6πη)
@@ -1430,15 +1484,24 @@ def plot_hydrodynamic_radius_analysis(
                         rh_range_m = rh_range * 1e-10  # Convert to m
                         d_theory_si = A * (rh_range_m**exponent)
 
+                        # Generate theoretical curve using fitted parameters
+                        rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
+                        rh_range_m = rh_range * 1e-10  # Convert to m
+                        d_theory_si = A * (rh_range_m**exponent)
+
+                        if fix_exponent:
+                            fit_label = f"Classical S-E fit: $D = A/R_H$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                        else:
+                            fit_label = f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+
                         plt.plot(
                             rh_range,
                             d_theory_si,
                             "r-",
                             linewidth=2,
-                            label=f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s",
+                            label=fit_label,
                         )
 
-                        print(f"Modified Stokes-Einstein fit results:")
                         print(f"  Exponent n: {exponent:.3f} ± {exponent_std_err:.3f}")
                         print(
                             f"  Prefactor A: {A:.2e} ± {A_std_err:.2e} m^({2-exponent})/s"
@@ -1449,7 +1512,7 @@ def plot_hydrodynamic_radius_analysis(
                         print(f"  η: {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
                         print(f"  Temperature: {temperature:.1f} K")
                         print(f"  R² = {r_squared:.3f}")
-                        if abs(exponent + 1) > 0.1:
+                        if not fix_exponent and abs(exponent + 1) > 0.1:
                             ref_radius_ang = np.exp(np.mean(np.log(rh_fit)))
                             print(
                                 f"  (Viscosity calculated at reference radius: {ref_radius_ang:.1f} Å)"
@@ -1551,6 +1614,11 @@ def main():
         type=float,
         default=298.15,
         help="Temperature in Kelvin for effective viscosity calculation (default: 298.15)",
+    )
+    parser.add_argument(
+        "--fix-exponent",
+        action="store_true",
+        help="Fix Stokes-Einstein exponent to -1 and use HuberRegressor for outlier handling",
     )
     parser.add_argument(
         "--plot", action="store_true", help="Generate plots for SD analysis"
@@ -1776,6 +1844,7 @@ def main():
                 output_dir=args.plot_dir,
                 show_plots=not args.quiet,
                 temperature=args.temperature,
+                fix_exponent=args.fix_exponent,
             )
 
             if not args.quiet:
