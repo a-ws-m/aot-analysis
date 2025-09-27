@@ -363,7 +363,7 @@ def calculate_hydrodynamic_radius(
     box_dimensions: np.ndarray,
     atom_types: Optional[np.ndarray] = None,
     use_rpy: bool = True,
-    coarse: bool = False,
+    coarse: bool = True,
 ) -> float:
     """Calculate hydrodynamic radius for a set of particles with PBC handling.
 
@@ -387,7 +387,7 @@ def calculate_hydrodynamic_radius(
         Shape (N,) array of atom types for determining bead radii
     use_rpy : bool, default=True
         Whether to use Rotne-Prager-Yamakawa kernel instead of Oseen kernel
-    coarse : bool, default=False
+    coarse : bool, default=True
         Whether this is a coarse-grained simulation (affects bead radius calculation)
 
     Returns
@@ -491,7 +491,7 @@ def _calculate_hydrodynamic_radius_jax(
     box_dimensions: np.ndarray,
     atom_types: Optional[np.ndarray] = None,
     use_rpy: bool = True,
-    coarse: bool = False,
+    coarse: bool = True,
 ) -> float:
     """JAX-optimized hydrodynamic radius calculation using manual pairwise distances."""
     if not JAX_AVAILABLE:
@@ -516,7 +516,7 @@ def _calculate_hydrodynamic_radius_numpy(
     box_dimensions: np.ndarray,
     atom_types: Optional[np.ndarray] = None,
     use_rpy: bool = True,
-    coarse: bool = False,
+    coarse: bool = True,
 ) -> float:
     """SciPy pdist-based implementation for hydrodynamic radius calculation."""
 
@@ -1002,21 +1002,12 @@ def calculate_aggregate_hydrodynamic_radius(
             # Get atom types (first character of each atom's type)
             atom_types = np.array([atom.type[0] for atom in agg_atoms])
 
-            # Determine if this is coarse-grained by checking if atom types are single characters
-            # and if they are common CG types (S, T, etc.)
-            # Sample a few atoms to avoid performance issues with large aggregates
-            sample_atoms = agg_atoms[: min(10, len(agg_atoms))]
-            coarse = all(
-                len(atom.type) == 1 and atom.type in ["S", "T", "P", "N", "C"]
-                for atom in sample_atoms
-            )
-
             rh = calculate_hydrodynamic_radius(
                 agg_atoms.positions,
                 u.dimensions[:3],
                 atom_types=atom_types,
                 use_rpy=use_rpy,
-                coarse=coarse,
+                coarse=True,  # Default to coarse-grained simulations
             )
 
             if rh > 0:  # Only add valid values
