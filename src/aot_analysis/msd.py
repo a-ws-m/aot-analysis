@@ -1068,6 +1068,242 @@ def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si):
     }
 
 
+def fit_two_regime_stokes_einstein(rh_fit_m, d_fit_si, d_err_si=None):
+    """
+    Fit a two-regime Stokes-Einstein relationship:
+    D = A_1 / R_H + B     for R_H < x
+    D = A_2 / R_H         for R_H >= x
+
+    Subject to the constraint: A_1 / x + B = A_2 / x
+
+    This means A_1 = A_2 - B * x, so we fit A_2, x, and B.
+
+    Uses weighted fitting with weights = 1/var(D) when diffusion errors are provided.
+
+    Parameters
+    ----------
+    rh_fit_m : array-like
+        Hydrodynamic radius values in meters
+    d_fit_si : array-like
+        Diffusion coefficient values in m²/s
+    d_err_si : array-like, optional
+        Diffusion coefficient errors in m²/s. If provided, weighted fitting is used.
+
+    Returns
+    -------
+    dict
+        Fitted parameters, uncertainties, and fit statistics.
+    """
+    import numpy as np
+    from scipy.optimize import differential_evolution, minimize
+    from sklearn.metrics import r2_score
+
+    # Sort data by R_H for easier processing
+    sort_idx = np.argsort(rh_fit_m)
+    rh_sorted = rh_fit_m[sort_idx]
+    d_sorted = d_fit_si[sort_idx]
+
+    # Handle weights for weighted fitting
+    if d_err_si is not None:
+        d_err_sorted = d_err_si[sort_idx]
+        # Calculate weights as 1/var(D) = 1/(sigma_D)^2
+        # Add small epsilon to avoid division by zero
+        weights = 1.0 / (d_err_sorted**2 + 1e-12)
+    else:
+        weights = np.ones_like(d_sorted)
+
+    def two_regime_model(params, rh):
+        """Two-regime model function"""
+        A_2, x, B = params
+        A_1 = A_2 - B * x  # Constraint: A_1/x + B = A_2/x
+
+        result = np.zeros_like(rh)
+        mask_low = rh < x
+        mask_high = rh >= x
+
+        result[mask_low] = A_1 / rh[mask_low] + B
+        result[mask_high] = A_2 / rh[mask_high]
+
+        return result
+
+    def objective(params):
+        """Objective function to minimize (weighted sum of squared residuals)"""
+        A_2, x, B = params
+
+        # Ensure physical constraints
+        if x <= rh_sorted.min() or x >= rh_sorted.max():
+            return 1e10
+        if A_2 <= 0:
+            return 1e10
+
+        A_1 = A_2 - B * x
+        if A_1 <= 0:  # A_1 must be positive for physical meaning
+            return 1e10
+
+        try:
+            y_pred = two_regime_model(params, rh_sorted)
+            residuals = d_sorted - y_pred
+            # Use weighted sum of squared residuals
+            return np.sum(weights * residuals**2)
+        except:
+            return 1e10
+
+    # Initial guess and bounds
+    # x should be somewhere in the middle range of R_H
+    x_min, x_max = rh_sorted.min() * 1.1, rh_sorted.max() * 0.9
+    x_init = np.exp(np.mean(np.log([x_min, x_max])))  # Geometric mean
+
+    # Initial guess for A_2 from a simple fit of the larger R_H values
+    high_rh_mask = rh_sorted > np.median(rh_sorted)
+    if np.sum(high_rh_mask) >= 3:
+        A_2_init = np.mean(d_sorted[high_rh_mask] * rh_sorted[high_rh_mask])
+    else:
+        A_2_init = np.mean(d_sorted * rh_sorted)
+
+    # Initial guess for B (small positive value)
+    B_init = np.min(d_sorted) * 0.1
+
+    # Bounds for optimization
+    bounds = [
+        (A_2_init * 0.1, A_2_init * 10),  # A_2 bounds
+        (x_min, x_max),  # x bounds
+        (-np.max(d_sorted), np.max(d_sorted)),  # B bounds (can be negative)
+    ]
+
+    # Use differential evolution for global optimization
+    try:
+        # Set random seed for reproducibility
+        np.random.seed(42)
+        result = differential_evolution(objective, bounds, maxiter=1000)
+
+        if not result.success:
+            # Fallback to local optimization
+            x0 = [A_2_init, x_init, B_init]
+            result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B")
+
+        if not result.success:
+            raise RuntimeError("Optimization failed")
+
+        A_2_opt, x_opt, B_opt = result.x
+        A_1_opt = A_2_opt - B_opt * x_opt
+
+    except Exception as e:
+        print(f"Warning: Two-regime fit failed: {e}")
+        return None
+
+    # Calculate fit statistics with weights
+    y_pred = two_regime_model([A_2_opt, x_opt, B_opt], rh_sorted)
+    residuals = d_sorted - y_pred
+
+    # Weighted mean for R² calculation
+    weighted_mean_d = np.average(d_sorted, weights=weights)
+
+    # Weighted sum of squares
+    ss_res_weighted = np.sum(weights * residuals**2)
+    ss_tot_weighted = np.sum(weights * (d_sorted - weighted_mean_d) ** 2)
+    r_squared = 1 - (ss_res_weighted / ss_tot_weighted) if ss_tot_weighted > 0 else 0
+
+    # Estimate parameter uncertainties using finite differences
+    def estimate_parameter_errors(params, rh, d, w):
+        """Estimate parameter uncertainties using the Hessian approximation with weights"""
+        eps = 1e-6
+        n_params = len(params)
+        hessian = np.zeros((n_params, n_params))
+
+        def local_objective(p):
+            try:
+                y_pred = two_regime_model(p, rh)
+                residuals = d - y_pred
+                return np.sum(w * residuals**2)
+            except:
+                return 1e10
+
+        # Approximate Hessian using finite differences
+        for i in range(n_params):
+            for j in range(n_params):
+                if i == j:
+                    # Second derivative
+                    p_plus = params.copy()
+                    p_minus = params.copy()
+                    p_plus[i] += eps
+                    p_minus[i] -= eps
+
+                    f_plus = local_objective(p_plus)
+                    f_center = local_objective(params)
+                    f_minus = local_objective(p_minus)
+
+                    hessian[i, j] = (f_plus - 2 * f_center + f_minus) / (eps**2)
+                else:
+                    # Mixed partial derivative
+                    p_pp = params.copy()
+                    p_pm = params.copy()
+                    p_mp = params.copy()
+                    p_mm = params.copy()
+
+                    p_pp[i] += eps
+                    p_pp[j] += eps
+                    p_pm[i] += eps
+                    p_pm[j] -= eps
+                    p_mp[i] -= eps
+                    p_mp[j] += eps
+                    p_mm[i] -= eps
+                    p_mm[j] -= eps
+
+                    hessian[i, j] = (
+                        local_objective(p_pp)
+                        - local_objective(p_pm)
+                        - local_objective(p_mp)
+                        + local_objective(p_mm)
+                    ) / (4 * eps**2)
+
+        try:
+            # Covariance matrix is inverse of Hessian/2 (for weighted least squares)
+            # Use weighted MSE for scaling
+            weighted_mse = ss_res_weighted / (len(rh) - n_params)
+            cov_matrix = np.linalg.inv(hessian / 2) * weighted_mse
+            param_errors = np.sqrt(np.diag(cov_matrix))
+            return param_errors, cov_matrix
+        except:
+            # If Hessian is singular, use a simple approximation
+            return np.array([0.1 * abs(p) for p in params]), np.eye(n_params)
+
+    param_errors, cov_matrix = estimate_parameter_errors(
+        [A_2_opt, x_opt, B_opt], rh_sorted, d_sorted, weights
+    )
+    A_2_err, x_err, B_err = param_errors
+
+    # Propagate error to A_1 = A_2 - B * x
+    # Var(A_1) = Var(A_2) + x^2 * Var(B) + B^2 * Var(x) - 2*x*Cov(A_2,B) + 2*B*Cov(A_2,x) - 2*x*B*Cov(B,x)
+    A_1_var = (
+        A_2_err**2
+        + (x_opt * B_err) ** 2
+        + (B_opt * x_err) ** 2
+        - 2 * x_opt * cov_matrix[0, 2]  # Cov(A_2, B)
+        + 2 * B_opt * cov_matrix[0, 1]  # Cov(A_2, x)
+        - 2 * x_opt * B_opt * cov_matrix[1, 2]
+    )  # Cov(x, B)
+    A_1_err = np.sqrt(max(0, A_1_var))
+
+    # Count points in each regime
+    n_low = np.sum(rh_sorted < x_opt)
+    n_high = np.sum(rh_sorted >= x_opt)
+
+    return {
+        "A_1": A_1_opt,
+        "A_1_err": A_1_err,
+        "A_2": A_2_opt,
+        "A_2_err": A_2_err,
+        "x": x_opt,
+        "x_err": x_err,
+        "B": B_opt,
+        "B_err": B_err,
+        "r_squared": r_squared,
+        "n_points_low": n_low,
+        "n_points_high": n_high,
+        "n_points_total": len(rh_sorted),
+    }
+
+
 def plot_hydrodynamic_radius_analysis(
     rh_df: pd.DataFrame,
     diffusion_df: Optional[pd.DataFrame] = None,
@@ -1075,6 +1311,7 @@ def plot_hydrodynamic_radius_analysis(
     show_plots: bool = True,
     temperature: float = 298.15,  # K
     fix_exponent: bool = False,
+    two_regime: bool = False,
 ):
     """Create plots for hydrodynamic radius analysis and calculate effective viscosity.
 
@@ -1092,6 +1329,8 @@ def plot_hydrodynamic_radius_analysis(
         Temperature in Kelvin for viscosity calculation
     fix_exponent : bool, default=False
         If True, fix the Stokes-Einstein exponent to -1 and use HuberRegressor for outlier handling
+    two_regime : bool, default=False
+        If True, fit a two-regime Stokes-Einstein relationship
     """
     # Set up the plotting style
     plt.style.use("default")
@@ -1177,94 +1416,244 @@ def plot_hydrodynamic_radius_analysis(
                         rh_fit_m = rh_values_m[valid_mask]
                         d_fit_si = d_values_si[valid_mask]
 
-                        if fix_exponent:
-                            fit_result = fit_stokes_einstein_fixed_exponent(
-                                rh_fit_m, d_fit_si
-                            )
-                            A = fit_result["A"]
-                            A_std_err = fit_result["A_std_err"]
-                            exponent = fit_result["exponent"]
-                            exponent_std_err = fit_result["exponent_std_err"]
-                            r_squared = fit_result["r_squared"]
-                            n_inliers = fit_result["n_inliers"]
-                            n_outliers = fit_result["n_outliers"]
-                            print(
-                                f"Fixed Stokes-Einstein fit results (n={n_inliers} inliers, {n_outliers} outliers):"
-                            )
-                        else:
-                            fit_result = fit_stokes_einstein_variable_exponent(
-                                rh_fit_m, d_fit_si
-                            )
-                            A = fit_result["A"]
-                            A_std_err = fit_result["A_std_err"]
-                            exponent = fit_result["exponent"]
-                            exponent_std_err = fit_result["exponent_std_err"]
-                            r_squared = fit_result["r_squared"]
-                            print(f"Modified Stokes-Einstein fit results:")
+                        if two_regime:
+                            # Get diffusion errors for weighted fitting
+                            d_err_values = np.array(
+                                merged_df["diffusion_error"]
+                            )  # Å²/ps
+                            d_err_values_si = d_err_values * 1e-8  # Å²/ps to m²/s
+                            d_err_fit_si = d_err_values_si[valid_mask]
 
-                        # Calculate effective viscosity even with modified exponent
-                        # For classical Stokes-Einstein: D = k_BT/(6πηR_H), so A = k_BT/(6πη)
-                        # Even if exponent ≠ -1, we can still estimate an "effective" viscosity
-                        # using the fitted A value at some reference radius
-                        k_B = 1.380649e-23  # Boltzmann constant in J/K
-                        if abs(exponent + 1) < 0.1:  # Close to classical exponent
-                            eta_fitted = k_B * temperature / (6 * np.pi * A)
-                            eta_std_err = (
-                                k_B * temperature * A_std_err / (6 * np.pi * A**2)
+                            # Fit two-regime Stokes-Einstein relationship with weights
+                            fit_result = fit_two_regime_stokes_einstein(
+                                rh_fit_m, d_fit_si, d_err_fit_si
                             )
-                        else:
-                            # For non-classical exponent, calculate effective viscosity
-                            # at the geometric mean of the radii
-                            ref_radius = np.exp(np.mean(np.log(rh_fit_m)))
-                            eta_fitted = (
-                                k_B
-                                * temperature
-                                / (6 * np.pi * A * ref_radius ** (exponent + 1))
-                            )
-                            # Uncertainty propagation is more complex for non-classical case
-                            eta_std_err = eta_fitted * np.sqrt(
-                                (A_std_err / A) ** 2
-                                + (
-                                    (exponent + 1)
-                                    * exponent_std_err
-                                    * np.log(ref_radius)
+
+                            if fit_result is not None:
+                                A_1 = fit_result["A_1"]
+                                A_1_err = fit_result["A_1_err"]
+                                A_2 = fit_result["A_2"]
+                                A_2_err = fit_result["A_2_err"]
+                                x_break = fit_result["x"]
+                                x_break_err = fit_result["x_err"]
+                                B = fit_result["B"]
+                                B_err = fit_result["B_err"]
+                                r_squared = fit_result["r_squared"]
+                                n_low = fit_result["n_points_low"]
+                                n_high = fit_result["n_points_high"]
+
+                                # Calculate viscosities for both regimes
+                                k_B = 1.380649e-23  # Boltzmann constant in J/K
+
+                                # Regime 1 (small R_H): D = A_1/R_H + B, effective η from A_1
+                                eta_1 = k_B * temperature / (6 * np.pi * A_1)
+                                eta_1_err = (
+                                    k_B * temperature * A_1_err / (6 * np.pi * A_1**2)
                                 )
-                                ** 2
+
+                                # Regime 2 (large R_H): D = A_2/R_H, classical Stokes-Einstein
+                                eta_2 = k_B * temperature / (6 * np.pi * A_2)
+                                eta_2_err = (
+                                    k_B * temperature * A_2_err / (6 * np.pi * A_2**2)
+                                )
+
+                                # Average viscosity weighted by number of points in each regime
+                                total_points = n_low + n_high
+                                if total_points > 0:
+                                    eta_avg = (
+                                        n_low * eta_1 + n_high * eta_2
+                                    ) / total_points
+                                    # Error propagation for weighted average
+                                    eta_avg_err = np.sqrt(
+                                        ((n_low / total_points) * eta_1_err) ** 2
+                                        + ((n_high / total_points) * eta_2_err) ** 2
+                                    )
+                                else:
+                                    eta_avg = (eta_1 + eta_2) / 2
+                                    eta_avg_err = (
+                                        np.sqrt(eta_1_err**2 + eta_2_err**2) / 2
+                                    )
+
+                                # Generate theoretical curves for both regimes
+                                rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
+                                rh_range_m = rh_range * 1e-10  # Convert to m
+
+                                x_break_ang = (
+                                    x_break * 1e10
+                                )  # Convert breakpoint back to Å for plotting
+
+                                # Regime 1: R_H < x_break
+                                mask_low = rh_range < x_break_ang
+                                d_theory_low = np.zeros_like(rh_range)
+                                d_theory_low[mask_low] = A_1 / rh_range_m[mask_low] + B
+
+                                # Regime 2: R_H >= x_break
+                                mask_high = rh_range >= x_break_ang
+                                d_theory_high = np.zeros_like(rh_range)
+                                d_theory_high[mask_high] = A_2 / rh_range_m[mask_high]
+
+                                # Plot both regimes
+                                if np.any(mask_low):
+                                    plt.plot(
+                                        rh_range[mask_low],
+                                        d_theory_low[mask_low],
+                                        "r-",
+                                        linewidth=2,
+                                        label=f"Regime 1: η₁ = {eta_1*1000:.2f} ± {eta_1_err*1000:.2f} mPa·s",
+                                    )
+
+                                if np.any(mask_high):
+                                    plt.plot(
+                                        rh_range[mask_high],
+                                        d_theory_high[mask_high],
+                                        "b-",
+                                        linewidth=2,
+                                        label=f"Regime 2: η₂ = {eta_2*1000:.2f} ± {eta_2_err*1000:.2f} mPa·s",
+                                    )
+
+                                # Mark the breakpoint
+                                y_break = A_2 / x_break  # D at breakpoint
+                                plt.axvline(
+                                    x_break_ang,
+                                    color="gray",
+                                    linestyle="--",
+                                    alpha=0.7,
+                                    label=f"Breakpoint: {x_break_ang:.1f} Å",
+                                )
+                                plt.plot(
+                                    x_break_ang,
+                                    y_break,
+                                    "ko",
+                                    markersize=8,
+                                    markerfacecolor="white",
+                                    markeredgewidth=2,
+                                )
+
+                                print(f"Two-regime Stokes-Einstein fit results:")
+                                print(
+                                    f"  Breakpoint x: {x_break_ang:.2f} ± {x_break_err*1e10:.2f} Å"
+                                )
+                                print(
+                                    f"  Regime 1 (R_H < {x_break_ang:.1f} Å): D = A₁/R_H + B"
+                                )
+                                print(f"    A₁: {A_1:.2e} ± {A_1_err:.2e} m²/s")
+                                print(f"    B: {B:.2e} ± {B_err:.2e} m²/s")
+                                print(
+                                    f"    η₁: {eta_1*1000:.2f} ± {eta_1_err*1000:.2f} mPa·s"
+                                )
+                                print(f"    Points: {n_low}")
+                                print(
+                                    f"  Regime 2 (R_H ≥ {x_break_ang:.1f} Å): D = A₂/R_H"
+                                )
+                                print(f"    A₂: {A_2:.2e} ± {A_2_err:.2e} m²/s")
+                                print(
+                                    f"    η₂: {eta_2*1000:.2f} ± {eta_2_err*1000:.2f} mPa·s"
+                                )
+                                print(f"    Points: {n_high}")
+                                print(
+                                    f"  Average viscosity: {eta_avg*1000:.2f} ± {eta_avg_err*1000:.2f} mPa·s"
+                                )
+                                print(f"  R² = {r_squared:.3f}")
+                                print(f"  Temperature: {temperature:.1f} K")
+
+                            else:
+                                print(
+                                    "Warning: Two-regime fit failed, falling back to single-regime fit"
+                                )
+                                two_regime = False  # Fall back to single regime
+
+                        if not two_regime:
+                            # Single-regime fitting (original code)
+                            if fix_exponent:
+                                fit_result = fit_stokes_einstein_fixed_exponent(
+                                    rh_fit_m, d_fit_si
+                                )
+                                A = fit_result["A"]
+                                A_std_err = fit_result["A_std_err"]
+                                exponent = fit_result["exponent"]
+                                exponent_std_err = fit_result["exponent_std_err"]
+                                r_squared = fit_result["r_squared"]
+                                n_inliers = fit_result["n_inliers"]
+                                n_outliers = fit_result["n_outliers"]
+                                print(
+                                    f"Fixed Stokes-Einstein fit results (n={n_inliers} inliers, {n_outliers} outliers):"
+                                )
+                            else:
+                                fit_result = fit_stokes_einstein_variable_exponent(
+                                    rh_fit_m, d_fit_si
+                                )
+                                A = fit_result["A"]
+                                A_std_err = fit_result["A_std_err"]
+                                exponent = fit_result["exponent"]
+                                exponent_std_err = fit_result["exponent_std_err"]
+                                r_squared = fit_result["r_squared"]
+                                print(f"Modified Stokes-Einstein fit results:")
+
+                            # Calculate effective viscosity even with modified exponent
+                            # For classical Stokes-Einstein: D = k_BT/(6πηR_H), so A = k_BT/(6πη)
+                            # Even if exponent ≠ -1, we can still estimate an "effective" viscosity
+                            # using the fitted A value at some reference radius
+                            k_B = 1.380649e-23  # Boltzmann constant in J/K
+                            if abs(exponent + 1) < 0.1:  # Close to classical exponent
+                                eta_fitted = k_B * temperature / (6 * np.pi * A)
+                                eta_std_err = (
+                                    k_B * temperature * A_std_err / (6 * np.pi * A**2)
+                                )
+                            else:
+                                # For non-classical exponent, calculate effective viscosity
+                                # at the geometric mean of the radii
+                                ref_radius = np.exp(np.mean(np.log(rh_fit_m)))
+                                eta_fitted = (
+                                    k_B
+                                    * temperature
+                                    / (6 * np.pi * A * ref_radius ** (exponent + 1))
+                                )
+                                # Uncertainty propagation is more complex for non-classical case
+                                eta_std_err = eta_fitted * np.sqrt(
+                                    (A_std_err / A) ** 2
+                                    + (
+                                        (exponent + 1)
+                                        * exponent_std_err
+                                        * np.log(ref_radius)
+                                    )
+                                    ** 2
+                                )
+
+                            # Generate theoretical curve using fitted parameters
+                            rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
+                            rh_range_m = rh_range * 1e-10  # Convert to m
+                            d_theory_si = A * (rh_range_m**exponent)
+
+                            if fix_exponent:
+                                fit_label = f"Classical S-E fit: $D = A/R_H$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                            else:
+                                fit_label = f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+
+                            plt.plot(
+                                rh_range,
+                                d_theory_si,
+                                "r-",
+                                linewidth=2,
+                                label=fit_label,
                             )
 
-                        # Generate theoretical curve using fitted parameters
-                        rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
-                        rh_range_m = rh_range * 1e-10  # Convert to m
-                        d_theory_si = A * (rh_range_m**exponent)
-
-                        if fix_exponent:
-                            fit_label = f"Classical S-E fit: $D = A/R_H$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
-                        else:
-                            fit_label = f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
-
-                        plt.plot(
-                            rh_range,
-                            d_theory_si,
-                            "r-",
-                            linewidth=2,
-                            label=fit_label,
-                        )
-
-                        print(f"  Exponent n: {exponent:.3f} ± {exponent_std_err:.3f}")
-                        print(
-                            f"  Prefactor A: {A:.2e} ± {A_std_err:.2e} m^({2-exponent})/s"
-                        )
-                        print(
-                            f"  Effective viscosity η: {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
-                        )
-                        print(f"  η: {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
-                        print(f"  Temperature: {temperature:.1f} K")
-                        print(f"  R² = {r_squared:.3f}")
-                        if not fix_exponent and abs(exponent + 1) > 0.1:
-                            ref_radius_ang = np.exp(np.mean(np.log(rh_fit)))
                             print(
-                                f"  (Viscosity calculated at reference radius: {ref_radius_ang:.1f} Å)"
+                                f"  Exponent n: {exponent:.3f} ± {exponent_std_err:.3f}"
                             )
+                            print(
+                                f"  Prefactor A: {A:.2e} ± {A_std_err:.2e} m^({2-exponent})/s"
+                            )
+                            print(
+                                f"  Effective viscosity η: {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                            )
+                            print(f"  η: {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
+                            print(f"  Temperature: {temperature:.1f} K")
+                            print(f"  R² = {r_squared:.3f}")
+                            if not fix_exponent and abs(exponent + 1) > 0.1:
+                                ref_radius_ang = np.exp(np.mean(np.log(rh_fit)))
+                                print(
+                                    f"  (Viscosity calculated at reference radius: {ref_radius_ang:.1f} Å)"
+                                )
 
                 except Exception as e:
                     print(f"Warning: Could not fit Stokes-Einstein relationship: {e}")
@@ -1367,6 +1756,11 @@ def main():
         "--fix-exponent",
         action="store_true",
         help="Fix Stokes-Einstein exponent to -1 and use HuberRegressor for outlier handling",
+    )
+    parser.add_argument(
+        "--two-regime-se",
+        action="store_true",
+        help="Fit a two-regime Stokes-Einstein relationship with breakpoint",
     )
     parser.add_argument(
         "--use-oseen",
@@ -1599,6 +1993,7 @@ def main():
                 show_plots=not args.quiet,
                 temperature=args.temperature,
                 fix_exponent=args.fix_exponent,
+                two_regime=args.two_regime_se,
             )
 
             if not args.quiet:
