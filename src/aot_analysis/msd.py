@@ -334,8 +334,11 @@ def calculate_hydrodynamic_radius(
 ) -> float:
     """Calculate hydrodynamic radius for a set of particles with PBC handling.
 
-    Uses the formula: <R_H^-1> = (1/N^2) * sum_{n,m} <1/|r_n - r_m|>
+    Uses the formula: <R_H^-1> = (2/(N(N-1))) * sum_{i<j} <1/|r_i - r_j|>
     R_H = 1 / <R_H^-1>
+
+    Only sums over the upper triangle of the distance matrix (i<j) to avoid
+    double counting and exclude self-interactions.
 
     Uses JAX for efficient pairwise distance calculations when available,
     falls back to NumPy implementation otherwise.
@@ -373,11 +376,11 @@ if JAX_AVAILABLE:
         box_jax = jnp.array(box_dimensions)
 
         # Manually calculate all pairwise distances
-        # Create indices for all pairs (i, j) where i != j
+        # Create indices for all pairs (i, j) where i < j (upper triangle only)
         i_indices, j_indices = jnp.meshgrid(jnp.arange(N), jnp.arange(N), indexing="ij")
 
-        # Create mask to exclude self-interactions
-        mask = i_indices != j_indices
+        # Create mask to only include upper triangle (i < j)
+        mask = i_indices < j_indices
 
         # Vectorized pairwise distance calculation
         # Expand dimensions for broadcasting
@@ -393,7 +396,7 @@ if JAX_AVAILABLE:
         # Calculate distances
         distances = jnp.sqrt(jnp.sum(displacements**2, axis=2))  # Shape: (N, N)
 
-        # Apply mask to exclude self-interactions and very small distances
+        # Apply mask to only include upper triangle and exclude very small distances
         valid_mask = mask & (distances > 1e-6)
 
         # Calculate inverse distances where mask is True, 0 elsewhere
@@ -403,7 +406,8 @@ if JAX_AVAILABLE:
         inverse_r_sum = jnp.sum(inverse_distances)
 
         # Calculate average inverse distance
-        avg_inverse_r = inverse_r_sum / (N * N)
+        # Now we sum over N(N-1)/2 terms instead of N²
+        avg_inverse_r = inverse_r_sum / (N * (N - 1) / 2)
 
         # Return hydrodynamic radius
         return 1.0 / avg_inverse_r
@@ -437,39 +441,28 @@ def _calculate_hydrodynamic_radius_numpy(
         """Custom distance metric that handles periodic boundary conditions."""
         displacement = u - v
         # Apply minimum image convention
-        displacement = np.where(
-            displacement > box_dimensions / 2,
-            displacement - box_dimensions,
-            displacement,
-        )
-        displacement = np.where(
-            displacement < -box_dimensions / 2,
-            displacement + box_dimensions,
-            displacement,
-        )
-        return np.sqrt(np.sum(displacement**2))
+        displacement -= np.round(displacement / box_dimensions) * box_dimensions
+        return np.linalg.norm(displacement)
 
     # Use pdist with custom PBC distance metric
     # pdist returns condensed distance matrix (upper triangle only)
     distances_condensed = pdist(positions, metric=pbc_distance_metric)
 
-    # Convert to full square matrix
-    distances_full = squareform(distances_condensed)
+    # Filter out very small distances
+    valid_distances = distances_condensed[distances_condensed > 1e-6]
 
-    # Create mask to exclude self-interactions and very small distances
-    mask = (distances_full > 1e-6) & (np.arange(N)[:, None] != np.arange(N)[None, :])
-
-    # Calculate inverse distances where mask is True, 0 elsewhere
-    inverse_distances = np.where(mask, 1.0 / distances_full, 0.0)
+    # Calculate inverse distances for valid distances only
+    inverse_distances = 1.0 / valid_distances
 
     # Sum all inverse distances
     inverse_r_sum = np.sum(inverse_distances)
 
     # Calculate average inverse distance
-    avg_inverse_r = inverse_r_sum / (N * N)
+    # We sum over N(N-1)/2 terms (upper triangle only)
+    avg_inverse_r = inverse_r_sum / (N * (N - 1) / 2)
 
     # Return hydrodynamic radius
-    return 1.0 / avg_inverse_r if avg_inverse_r > 0 else 0.0
+    return float(1.0 / avg_inverse_r) if avg_inverse_r > 0 else 0.0
 
 
 def calculate_radius_of_gyration(
