@@ -802,7 +802,7 @@ def plot_sd_fit(
     # Create the plot
     plt.figure(figsize=(12, 8))
 
-    # Create violin plot to show distribution of SD values at each time point
+    # Create violin plot to show the distribution of SD values at each time point
     sns.violinplot(
         data=filtered_data,
         x="delta_t",
@@ -988,6 +988,86 @@ def plot_sd_analysis(
         print("- Aggregates too short-lived for meaningful MSD calculation")
 
 
+def fit_stokes_einstein_fixed_exponent(rh_fit_m, d_fit_si):
+    """
+    Fit the classical Stokes-Einstein relationship D = A / R_H (exponent = -1)
+    using HuberRegressor for robust fitting. Returns A, std_err, n_inliers, n_outliers, r_squared.
+    """
+    import numpy as np
+    from sklearn.linear_model import HuberRegressor
+    from sklearn.metrics import r2_score
+
+    y_transformed = np.log(d_fit_si * rh_fit_m)  # log(D * R_H)
+    X_dummy = np.zeros((len(y_transformed), 1))  # Dummy variable for constant fit
+    regressor = HuberRegressor(fit_intercept=True, alpha=0.0)
+    regressor.fit(X_dummy, y_transformed)
+    log_A = regressor.intercept_
+    A = np.exp(log_A)
+    inlier_mask = ~regressor.outliers_
+    y_inliers = y_transformed[inlier_mask]
+    y_pred_inliers = np.full_like(y_inliers, log_A)
+    r_squared = r2_score(y_inliers, y_pred_inliers) if len(y_inliers) > 1 else 0.0
+    n_inliers = np.sum(inlier_mask)
+    n_outliers = np.sum(regressor.outliers_)
+    if n_inliers > 1:
+        residuals_inliers = y_inliers - log_A
+        mse_inliers = np.mean(residuals_inliers**2)
+        log_A_std_err = np.sqrt(mse_inliers / n_inliers)
+        A_std_err = A * log_A_std_err
+    else:
+        log_A_std_err = 0.0
+        A_std_err = 0.0
+    return {
+        "A": A,
+        "A_std_err": A_std_err,
+        "exponent": -1.0,
+        "exponent_std_err": 0.0,
+        "r_squared": r_squared,
+        "n_inliers": n_inliers,
+        "n_outliers": n_outliers,
+        "log_A": log_A,
+        "log_A_std_err": log_A_std_err,
+    }
+
+
+def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si):
+    """
+    Fit the modified Stokes-Einstein relationship D = A * R_H^n (variable exponent)
+    using linear regression in log-log space. Returns A, n, std_errs, r_squared.
+    """
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import r2_score
+
+    X = np.log(rh_fit_m).reshape(-1, 1)  # log(R_H)
+    y = np.log(d_fit_si)  # log(D)
+    regressor = LinearRegression(fit_intercept=True)
+    regressor.fit(X, y)
+    exponent = regressor.coef_[0]
+    log_A = regressor.intercept_
+    A = np.exp(log_A)
+    y_pred_log = regressor.predict(X)
+    r_squared = r2_score(y, y_pred_log)
+    residuals = y - y_pred_log
+    mse = np.mean(residuals**2)
+    X_centered = X - np.mean(X)
+    exponent_variance = mse / np.sum(X_centered**2)
+    exponent_std_err = np.sqrt(exponent_variance)
+    n_points = len(X)
+    log_A_variance = mse * (1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2))
+    log_A_std_err = np.sqrt(log_A_variance)
+    A_std_err = A * log_A_std_err
+    return {
+        "A": A,
+        "A_std_err": A_std_err,
+        "exponent": exponent,
+        "exponent_std_err": exponent_std_err,
+        "r_squared": r_squared,
+        "log_A": log_A,
+        "log_A_std_err": log_A_std_err,
+    }
+
+
 def plot_hydrodynamic_radius_analysis(
     rh_df: pd.DataFrame,
     diffusion_df: Optional[pd.DataFrame] = None,
@@ -1098,94 +1178,35 @@ def plot_hydrodynamic_radius_analysis(
                         d_fit_si = d_values_si[valid_mask]
 
                         if fix_exponent:
-                            # Fixed exponent case: D = A / R_H (exponent = -1)
-                            # Transform to: D * R_H = A
-                            # Use log space: log(D * R_H) = log(A)
-
-                            y_transformed = np.log(d_fit_si * rh_fit_m)  # log(D * R_H)
-
-                            # Use HuberRegressor for robust fitting (no X needed for constant fit)
-                            # We're fitting a constant: log(D * R_H) = log(A)
-                            regressor = HuberRegressor(fit_intercept=True, alpha=0.0)
-                            X_dummy = np.zeros(
-                                (len(y_transformed), 1)
-                            )  # Dummy variable for constant fit
-                            regressor.fit(X_dummy, y_transformed)
-
-                            # Get the fitted constant (log(A))
-                            log_A = regressor.intercept_
-                            A = np.exp(log_A)
-                            exponent = -1.0  # Fixed exponent
-
-                            # Calculate R² using only inliers
-                            inlier_mask = ~regressor.outliers_
-                            y_inliers = y_transformed[inlier_mask]
-                            y_pred_inliers = np.full_like(y_inliers, log_A)
-                            r_squared = (
-                                r2_score(y_inliers, y_pred_inliers)
-                                if len(y_inliers) > 1
-                                else 0.0
+                            fit_result = fit_stokes_einstein_fixed_exponent(
+                                rh_fit_m, d_fit_si
                             )
-
-                            # Calculate standard errors using only inliers
-                            n_inliers = np.sum(inlier_mask)
-                            if n_inliers > 1:
-                                residuals_inliers = y_inliers - log_A
-                                mse_inliers = np.mean(residuals_inliers**2)
-                                log_A_std_err = np.sqrt(mse_inliers / n_inliers)
-                                A_std_err = A * log_A_std_err
-                                exponent_std_err = 0.0  # Fixed, so no uncertainty
-                            else:
-                                log_A_std_err = 0.0
-                                A_std_err = 0.0
-                                exponent_std_err = 0.0
-
+                            A = fit_result["A"]
+                            A_std_err = fit_result["A_std_err"]
+                            exponent = fit_result["exponent"]
+                            exponent_std_err = fit_result["exponent_std_err"]
+                            r_squared = fit_result["r_squared"]
+                            n_inliers = fit_result["n_inliers"]
+                            n_outliers = fit_result["n_outliers"]
                             print(
-                                f"Fixed Stokes-Einstein fit results (n={n_inliers} inliers, {np.sum(~inlier_mask)} outliers):"
+                                f"Fixed Stokes-Einstein fit results (n={n_inliers} inliers, {n_outliers} outliers):"
                             )
-
                         else:
-                            # Variable exponent case: D = A * R_H^n
-                            # Log-linear regression: log(D) = log(A) + n * log(R_H)
-                            X = np.log(rh_fit_m).reshape(-1, 1)  # log(R_H)
-                            y = np.log(d_fit_si)  # log(D)
-
-                            # Fit the linear model in log space
-                            regressor = LinearRegression(fit_intercept=True)
-                            regressor.fit(X, y)
-
-                            # Get the slope (exponent) and intercept
-                            exponent = regressor.coef_[0]  # This is n in D = A * R_H^n
-                            log_A = regressor.intercept_  # This is log(A)
-                            A = np.exp(log_A)  # Convert back to linear scale
-
-                            # Calculate R² score in log space
-                            y_pred_log = regressor.predict(X)
-                            r_squared = r2_score(y, y_pred_log)
-
-                            # Calculate standard errors
-                            residuals = y - y_pred_log
-                            mse = np.mean(residuals**2)
-                            X_centered = X - np.mean(X)
-                            exponent_variance = mse / np.sum(X_centered**2)
-                            exponent_std_err = np.sqrt(exponent_variance)
-
-                            # Standard error for log_A (intercept)
-                            n_points = len(X)
-                            log_A_variance = mse * (
-                                1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2)
+                            fit_result = fit_stokes_einstein_variable_exponent(
+                                rh_fit_m, d_fit_si
                             )
-                            log_A_std_err = np.sqrt(log_A_variance)
-
-                            # Propagate uncertainty to A
-                            A_std_err = A * log_A_std_err
-
+                            A = fit_result["A"]
+                            A_std_err = fit_result["A_std_err"]
+                            exponent = fit_result["exponent"]
+                            exponent_std_err = fit_result["exponent_std_err"]
+                            r_squared = fit_result["r_squared"]
                             print(f"Modified Stokes-Einstein fit results:")
 
                         # Calculate effective viscosity even with modified exponent
                         # For classical Stokes-Einstein: D = k_BT/(6πηR_H), so A = k_BT/(6πη)
                         # Even if exponent ≠ -1, we can still estimate an "effective" viscosity
                         # using the fitted A value at some reference radius
+                        k_B = 1.380649e-23  # Boltzmann constant in J/K
                         if abs(exponent + 1) < 0.1:  # Close to classical exponent
                             eta_fitted = k_B * temperature / (6 * np.pi * A)
                             eta_std_err = (
@@ -1210,11 +1231,6 @@ def plot_hydrodynamic_radius_analysis(
                                 )
                                 ** 2
                             )
-
-                        # Generate theoretical curve using fitted parameters
-                        rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
-                        rh_range_m = rh_range * 1e-10  # Convert to m
-                        d_theory_si = A * (rh_range_m**exponent)
 
                         # Generate theoretical curve using fitted parameters
                         rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
@@ -1587,7 +1603,3 @@ def main():
 
             if not args.quiet:
                 print(f"Hydrodynamic radius plots saved to: {args.plot_dir}")
-
-
-if __name__ == "__main__":
-    main()
