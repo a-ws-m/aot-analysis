@@ -7,6 +7,7 @@ timesteps where the aggregate exists.
 """
 
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 from typing import FrozenSet, Optional, Set
 
@@ -328,13 +329,46 @@ def hypersphere_center_of_mass(
     return true_com
 
 
+def get_bead_radius(atom_type: str, coarse: bool = False) -> float:
+    """Determine the bead radius for an atom type.
+
+    Parameters
+    ----------
+    atom_type : str
+        The atom type (first character of atom.type in MDAnalysis)
+    coarse : bool, default=False
+        Whether this is a coarse-grained simulation
+
+    Returns
+    -------
+    float
+        Bead radius in Angstroms
+    """
+    if coarse:
+        # Coarse-grained Martini radii (see cluster.py vdwradii property)
+        if atom_type == "S":
+            return 0.230
+        elif atom_type == "T":
+            return 0.191
+        else:
+            return 0.264
+    else:
+        # For atomistic simulations, use a default radius
+        # This could be refined based on actual van der Waals radii
+        return 2.0  # Default radius in Angstroms
+
+
 def calculate_hydrodynamic_radius(
     positions: np.ndarray,
     box_dimensions: np.ndarray,
+    atom_types: Optional[np.ndarray] = None,
+    use_rpy: bool = True,
+    coarse: bool = False,
 ) -> float:
     """Calculate hydrodynamic radius for a set of particles with PBC handling.
 
-    Uses the formula: <R_H^-1> = (2/(N(N-1))) * sum_{i<j} <1/|r_i - r_j|>
+    Uses either Oseen kernel (1/r) or Rotne-Prager-Yamakawa kernel with:
+    <R_H^-1> = (2/(N(N-1))) * sum_{i<j} <kernel(r_ij)>
     R_H = 1 / <R_H^-1>
 
     Only sums over the upper triangle of the distance matrix (i<j) to avoid
@@ -349,6 +383,12 @@ def calculate_hydrodynamic_radius(
         Shape (N, 3) array of particle positions
     box_dimensions : np.ndarray
         Shape (3,) array of box dimensions
+    atom_types : np.ndarray, optional
+        Shape (N,) array of atom types for determining bead radii
+    use_rpy : bool, default=True
+        Whether to use Rotne-Prager-Yamakawa kernel instead of Oseen kernel
+    coarse : bool, default=False
+        Whether this is a coarse-grained simulation (affects bead radius calculation)
 
     Returns
     -------
@@ -360,20 +400,25 @@ def calculate_hydrodynamic_radius(
         return 0.0
 
     if JAX_AVAILABLE and N > 10:  # Use JAX for larger systems where it's more efficient
-        return _calculate_hydrodynamic_radius_jax(positions, box_dimensions)
+        return _calculate_hydrodynamic_radius_jax(
+            positions, box_dimensions, atom_types, use_rpy, coarse
+        )
     else:
-        return _calculate_hydrodynamic_radius_numpy(positions, box_dimensions)
+        return _calculate_hydrodynamic_radius_numpy(
+            positions, box_dimensions, atom_types, use_rpy, coarse
+        )
 
 
 if JAX_AVAILABLE:
 
-    @jit
-    def _compute_rh(positions, box_dimensions):
+    @partial(jit, static_argnames=["use_rpy"])
+    def _compute_rh(positions, box_dimensions, bead_radii, use_rpy):
         N = len(positions)
 
         # Convert to JAX arrays
         pos_jax = jnp.array(positions)
         box_jax = jnp.array(box_dimensions)
+        radii_jax = jnp.array(bead_radii)
 
         # Manually calculate all pairwise distances
         # Create indices for all pairs (i, j) where i < j (upper triangle only)
@@ -399,39 +444,93 @@ if JAX_AVAILABLE:
         # Apply mask to only include upper triangle and exclude very small distances
         valid_mask = mask & (distances > 1e-6)
 
-        # Calculate inverse distances where mask is True, 0 elsewhere
-        inverse_distances = jnp.where(valid_mask, 1.0 / distances, 0.0)
+        if use_rpy:
+            # Rotne-Prager-Yamakawa kernel (scalar, orientationally averaged)
+            # Get bead radii for each pair
+            ai = radii_jax[i_indices]  # Shape: (N, N)
+            aj = radii_jax[j_indices]  # Shape: (N, N)
 
-        # Sum all inverse distances
-        inverse_r_sum = jnp.sum(inverse_distances)
+            # Non-overlap condition: r >= ai + aj
+            rcut = ai + aj
+            non_overlap = distances >= rcut
 
-        # Calculate average inverse distance
+            # Non-overlap formula (unequal radii): phi = (1/r) * (1 + (ai^2 + aj^2)/(3*r^2))
+            kernel_non_overlap = (1.0 / distances) * (
+                1.0 + (ai**2 + aj**2) / (3.0 * distances**2)
+            )
+
+            # Overlap formula (r < ai + aj): more complex, use simplified approximation
+            # For simplicity, use the average radius approximation for overlap region
+            a_avg = (ai + aj) / 2.0
+            kernel_overlap = (1 / (2 * a_avg)) * (
+                1 - (9 * distances) / (32 * a_avg) + (distances**3) / (32 * a_avg**3)
+            )
+
+            # Combine overlap and non-overlap regions
+            kernel = jnp.where(non_overlap, kernel_non_overlap, kernel_overlap)
+        else:
+            # Oseen kernel (original)
+            kernel = 1.0 / distances
+
+        # Apply mask and calculate kernel values where valid
+        kernel_values = jnp.where(valid_mask, kernel, 0.0)
+
+        # Sum all kernel values
+        kernel_sum = jnp.sum(kernel_values)
+
+        # Calculate average kernel value
         # Now we sum over N(N-1)/2 terms instead of N²
-        avg_inverse_r = inverse_r_sum / (N * (N - 1) / 2)
+        avg_kernel = kernel_sum / (N * (N - 1) / 2)
 
         # Return hydrodynamic radius
-        return 1.0 / avg_inverse_r
+        return 1.0 / avg_kernel
 
 
 def _calculate_hydrodynamic_radius_jax(
     positions: np.ndarray,
     box_dimensions: np.ndarray,
+    atom_types: Optional[np.ndarray] = None,
+    use_rpy: bool = True,
+    coarse: bool = False,
 ) -> float:
     """JAX-optimized hydrodynamic radius calculation using manual pairwise distances."""
     if not JAX_AVAILABLE:
         raise ImportError("JAX is not available")
 
-    rh = _compute_rh(positions, box_dimensions)
+    # Determine bead radii for each atom
+    if atom_types is not None:
+        bead_radii = np.array(
+            [get_bead_radius(atom_type, coarse) for atom_type in atom_types]
+        )
+    else:
+        # Use default radius for all atoms
+        default_radius = get_bead_radius("", coarse)
+        bead_radii = np.full(len(positions), default_radius)
+
+    rh = _compute_rh(positions, box_dimensions, bead_radii, use_rpy)
     return rh if not jnp.isnan(rh) else 0.0
 
 
 def _calculate_hydrodynamic_radius_numpy(
     positions: np.ndarray,
     box_dimensions: np.ndarray,
+    atom_types: Optional[np.ndarray] = None,
+    use_rpy: bool = True,
+    coarse: bool = False,
 ) -> float:
     """SciPy pdist-based implementation for hydrodynamic radius calculation."""
 
     N = len(positions)
+
+    # Determine bead radii for each atom
+    if atom_types is not None:
+        bead_radii = np.array(
+            [get_bead_radius(atom_type, coarse) for atom_type in atom_types]
+        )
+    else:
+        # Use default radius for all atoms
+        default_radius = get_bead_radius("", coarse)
+        bead_radii = np.full(N, default_radius)
 
     # For PBC, we need to handle the minimum image convention
     # Since pdist doesn't handle PBC directly, we'll apply PBC corrections
@@ -441,7 +540,9 @@ def _calculate_hydrodynamic_radius_numpy(
         """Custom distance metric that handles periodic boundary conditions."""
         displacement = u - v
         # Apply minimum image convention
-        displacement -= np.round(displacement / box_dimensions) * box_dimensions
+        displacement = (
+            displacement - np.round(displacement / box_dimensions) * box_dimensions
+        )
         return np.linalg.norm(displacement)
 
     # Use pdist with custom PBC distance metric
@@ -451,18 +552,55 @@ def _calculate_hydrodynamic_radius_numpy(
     # Filter out very small distances
     valid_distances = distances_condensed[distances_condensed > 1e-6]
 
-    # Calculate inverse distances for valid distances only
-    inverse_distances = 1.0 / valid_distances
+    if use_rpy and len(valid_distances) > 0:
+        # For RPY kernel, we need to map back to get the corresponding bead radii
+        # Since pdist returns condensed form, we need to reconstruct which atoms correspond to each distance
+        from scipy.spatial.distance import squareform
 
-    # Sum all inverse distances
-    inverse_r_sum = np.sum(inverse_distances)
+        # Get full distance matrix
+        distance_matrix = squareform(distances_condensed)
 
-    # Calculate average inverse distance
+        # Calculate kernel values
+        kernel_values = []
+
+        for i in range(N):
+            for j in range(i + 1, N):
+                rij = distance_matrix[i, j]
+                if rij > 1e-6:
+                    # Get individual radii for this pair
+                    ai = bead_radii[i]
+                    aj = bead_radii[j]
+
+                    # Non-overlap condition: r >= ai + aj
+                    rcut = ai + aj
+
+                    if rij >= rcut:
+                        # Non-overlap formula (unequal radii): phi = (1/r) * (1 + (ai^2 + aj^2)/(3*r^2))
+                        kernel = (1.0 / rij) * (1.0 + (ai**2 + aj**2) / (3.0 * rij**2))
+                    else:
+                        # Overlap formula: use simplified approximation with average radius
+                        # (More complex exact formula exists but this is reasonable approximation)
+                        a_avg = (ai + aj) / 2.0
+                        kernel = (1 / (2 * a_avg)) * (
+                            1 - (9 * rij) / (32 * a_avg) + (rij**3) / (32 * a_avg**3)
+                        )
+
+                    kernel_values.append(kernel)
+
+        kernel_values = np.array(kernel_values)
+    else:
+        # Oseen kernel (original)
+        kernel_values = 1.0 / valid_distances
+
+    # Sum all kernel values
+    kernel_sum = np.sum(kernel_values)
+
+    # Calculate average kernel value
     # We sum over N(N-1)/2 terms (upper triangle only)
-    avg_inverse_r = inverse_r_sum / (N * (N - 1) / 2)
+    avg_kernel = kernel_sum / (N * (N - 1) / 2)
 
     # Return hydrodynamic radius
-    return float(1.0 / avg_inverse_r) if avg_inverse_r > 0 else 0.0
+    return float(1.0 / avg_kernel) if avg_kernel > 0 else 0.0
 
 
 def calculate_radius_of_gyration(
@@ -768,6 +906,7 @@ def calculate_aggregate_hydrodynamic_radius(
     structure_path: str,
     lifetime_df: pd.DataFrame,
     tail_selection: str = "name C6 C7 C8 C9 C10 C11 C15 C16 C17 C18 C19 C20",
+    use_rpy: bool = True,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Calculate average hydrodynamic radius for aggregates by size.
@@ -782,6 +921,8 @@ def calculate_aggregate_hydrodynamic_radius(
         DataFrame with aggregate lifetimes from analyze_aggregate_lifetimes
     tail_selection : str
         MDAnalysis selection string for tail atoms
+    use_rpy : bool, default=True
+        Whether to use Rotne-Prager-Yamakawa kernel instead of Oseen kernel
     verbose : bool
         Whether to print progress information
 
@@ -858,7 +999,25 @@ def calculate_aggregate_hydrodynamic_radius(
             u.trajectory[frame_idx]
 
             # Calculate hydrodynamic radius using all atom positions in the aggregate
-            rh = calculate_hydrodynamic_radius(agg_atoms.positions, u.dimensions[:3])
+            # Get atom types (first character of each atom's type)
+            atom_types = np.array([atom.type[0] for atom in agg_atoms])
+
+            # Determine if this is coarse-grained by checking if atom types are single characters
+            # and if they are common CG types (S, T, etc.)
+            # Sample a few atoms to avoid performance issues with large aggregates
+            sample_atoms = agg_atoms[: min(10, len(agg_atoms))]
+            coarse = all(
+                len(atom.type) == 1 and atom.type in ["S", "T", "P", "N", "C"]
+                for atom in sample_atoms
+            )
+
+            rh = calculate_hydrodynamic_radius(
+                agg_atoms.positions,
+                u.dimensions[:3],
+                atom_types=atom_types,
+                use_rpy=use_rpy,
+                coarse=coarse,
+            )
 
             if rh > 0:  # Only add valid values
                 rh_values.append(rh)
@@ -1621,6 +1780,11 @@ def main():
         help="Fix Stokes-Einstein exponent to -1 and use HuberRegressor for outlier handling",
     )
     parser.add_argument(
+        "--use-oseen",
+        action="store_true",
+        help="Use Oseen kernel (1/r) instead of Rotne-Prager-Yamakawa kernel for hydrodynamic radius calculation",
+    )
+    parser.add_argument(
         "--plot", action="store_true", help="Generate plots for SD analysis"
     )
     parser.add_argument(
@@ -1801,6 +1965,7 @@ def main():
             structure_path=args.structure,
             lifetime_df=results_df,
             tail_selection=args.tail_selection,
+            use_rpy=not args.use_oseen,  # RPY is default, Oseen if flag is set
             verbose=not args.quiet,
         )
 
