@@ -1025,10 +1025,21 @@ def fit_stokes_einstein_fixed_exponent(rh_fit_m, d_fit_si):
     }
 
 
-def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si):
+def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si, d_err_si=None):
     """
     Fit the modified Stokes-Einstein relationship D = A * R_H^n (variable exponent)
-    using linear regression in log-log space. Returns A, n, std_errs, r_squared.
+    using weighted least squares (WLS) in log-log space, where weights are 1/var(D).
+    Returns A, n, std_errs, r_squared.
+
+    Parameters
+    ----------
+    rh_fit_m : array-like
+        Hydrodynamic radii in meters
+    d_fit_si : array-like
+        Diffusion coefficients in m²/s
+    d_err_si : array-like, optional
+        Standard errors of diffusion coefficients in m²/s
+        If None, uses unweighted least squares
     """
     import numpy as np
     from sklearn.linear_model import LinearRegression
@@ -1036,22 +1047,91 @@ def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si):
 
     X = np.log(rh_fit_m).reshape(-1, 1)  # log(R_H)
     y = np.log(d_fit_si)  # log(D)
+
+    # Calculate weights for WLS
+    if d_err_si is not None:
+        # Weights are 1/var(D) = 1/sigma^2
+        # For log(D), we need to propagate the error: d(log(D))/dD = 1/D
+        # So sigma_log(D) = sigma_D / D
+        sigma_log_d = d_err_si / d_fit_si
+        weights = 1.0 / (sigma_log_d**2)
+
+        # Avoid infinite weights
+        weights = np.where(np.isfinite(weights), weights, 1.0)
+        weights = np.where(weights > 0, weights, 1.0)
+    else:
+        weights = None
+
+    # Fit using WLS
     regressor = LinearRegression(fit_intercept=True)
-    regressor.fit(X, y)
+    if weights is not None:
+        # Apply weights
+        regressor.fit(X, y, sample_weight=weights)
+    else:
+        regressor.fit(X, y)
+
     exponent = regressor.coef_[0]
     log_A = regressor.intercept_
     A = np.exp(log_A)
-    y_pred_log = regressor.predict(X)
-    r_squared = r2_score(y, y_pred_log)
+
+    # Calculate predictions and R²
+    y_pred_log = (
+        regressor.predict(X)
+        if weights is None
+        else (regressor.coef_[0] * X.flatten() + regressor.intercept_)
+    )
+
+    if weights is not None:
+        # Weighted R²
+        ss_res = np.sum(weights * (y - y_pred_log) ** 2)
+        ss_tot = np.sum(weights * (y - np.average(y, weights=weights)) ** 2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+    else:
+        r_squared = r2_score(y, y_pred_log)
+
+    # Calculate parameter uncertainties for WLS
     residuals = y - y_pred_log
-    mse = np.mean(residuals**2)
-    X_centered = X - np.mean(X)
-    exponent_variance = mse / np.sum(X_centered**2)
-    exponent_std_err = np.sqrt(exponent_variance)
     n_points = len(X)
-    log_A_variance = mse * (1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2))
-    log_A_std_err = np.sqrt(log_A_variance)
-    A_std_err = A * log_A_std_err
+
+    if weights is not None:
+        # Weighted uncertainties
+        # Calculate the weighted covariance matrix
+        X_design = np.column_stack([np.ones(n_points), X.flatten()])  # [1, log(R_H)]
+        W = np.diag(weights)
+
+        try:
+            # Covariance matrix: (X^T W X)^-1
+            XtWX = X_design.T @ W @ X_design
+            cov_matrix = np.linalg.inv(XtWX)
+
+            log_A_variance = cov_matrix[0, 0]
+            exponent_variance = cov_matrix[1, 1]
+
+            log_A_std_err = np.sqrt(log_A_variance)
+            exponent_std_err = np.sqrt(exponent_variance)
+            A_std_err = A * log_A_std_err
+
+        except np.linalg.LinAlgError:
+            # Fallback to unweighted calculation
+            X_centered = X - np.mean(X)
+            mse = np.sum(weights * residuals**2) / np.sum(weights)
+            exponent_variance = mse / np.sum(X_centered**2)
+            exponent_std_err = np.sqrt(exponent_variance)
+            log_A_variance = mse * (
+                1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2)
+            )
+            log_A_std_err = np.sqrt(log_A_variance)
+            A_std_err = A * log_A_std_err
+    else:
+        # Unweighted uncertainties (original calculation)
+        mse = np.mean(residuals**2)
+        X_centered = X - np.mean(X)
+        exponent_variance = mse / np.sum(X_centered**2)
+        exponent_std_err = np.sqrt(exponent_variance)
+        log_A_variance = mse * (1 / n_points + np.mean(X) ** 2 / np.sum(X_centered**2))
+        log_A_std_err = np.sqrt(log_A_variance)
+        A_std_err = A * log_A_std_err
+
     return {
         "A": A,
         "A_std_err": A_std_err,
@@ -1397,6 +1477,10 @@ def plot_hydrodynamic_radius_analysis(
                     rh_values_m = rh_values * 1e-10  # Å to m
                     d_values_si = d_values * 1e-8  # Å²/ps to m²/s
 
+                    # Get diffusion errors for weighted fitting (available for all fitting modes)
+                    d_err_values = np.array(merged_df["diffusion_error"])  # Å²/ps
+                    d_err_values_si = d_err_values * 1e-8  # Å²/ps to m²/s
+
                     # Filter out any non-positive values
                     valid_mask = (rh_values > 0) & (d_values > 0)
                     if np.sum(valid_mask) >= 3:
@@ -1404,14 +1488,9 @@ def plot_hydrodynamic_radius_analysis(
                         d_fit = d_values[valid_mask]
                         rh_fit_m = rh_values_m[valid_mask]
                         d_fit_si = d_values_si[valid_mask]
+                        d_err_fit_si = d_err_values_si[valid_mask]
 
                         if two_regime:
-                            # Get diffusion errors for weighted fitting
-                            d_err_values = np.array(
-                                merged_df["diffusion_error"]
-                            )  # Å²/ps
-                            d_err_values_si = d_err_values * 1e-8  # Å²/ps to m²/s
-                            d_err_fit_si = d_err_values_si[valid_mask]
 
                             # Fit two-regime Stokes-Einstein relationship with weights
                             fit_result = fit_two_regime_stokes_einstein(
@@ -1566,7 +1645,7 @@ def plot_hydrodynamic_radius_analysis(
                                 )
                             else:
                                 fit_result = fit_stokes_einstein_variable_exponent(
-                                    rh_fit_m, d_fit_si
+                                    rh_fit_m, d_fit_si, d_err_fit_si
                                 )
                                 A = fit_result["A"]
                                 A_std_err = fit_result["A_std_err"]
