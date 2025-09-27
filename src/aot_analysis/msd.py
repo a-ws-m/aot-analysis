@@ -828,12 +828,12 @@ def plot_sd_fit(
         sd_fit,
         "r-",
         linewidth=3,
-        label=f"Weighted fit: D = {diffusion_coeff_si:.2e} m²/s",
+        label=f"Weighted fit: D = {diffusion_coeff_si:.2e} $\\mathrm{{m^2/s}}$",
         zorder=10,
     )
 
-    plt.xlabel("Δt (ps)")
-    plt.ylabel("SD (Å²)")
+    plt.xlabel("$\\Delta t$ (ps)")
+    plt.ylabel("SD ($\\mathrm{\\AA}^2$)")
     plt.title(f"SD Distribution vs Time for Aggregate Size {aggregate_size}")
     plt.legend()
 
@@ -841,7 +841,7 @@ def plot_sd_fit(
     plt.text(
         0.05,
         0.95,
-        f"R² = {r_squared:.4f}",
+        f"$R^2$ = {r_squared:.4f}",
         transform=plt.gca().transAxes,
         fontsize=12,
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
@@ -912,7 +912,7 @@ def plot_sd_analysis(
                 alpha=0.7,
             )
 
-            g.set_axis_labels("Δt (ps)", "SD (Å$^2$)")
+            g.set_axis_labels("$\\Delta t$ (ps)", "SD ($\\mathrm{\\AA}^2$)")
             g.set(yscale="log")
             g.figure.suptitle("Squared Displacement vs Time by Aggregate Size")
             plt.tight_layout()
@@ -949,7 +949,7 @@ def plot_sd_analysis(
         )
 
         plt.xlabel("Aggregation Number")
-        plt.ylabel("Diffusion Coefficient (m²/s)")
+        plt.ylabel("Diffusion Coefficient ($\\mathrm{m^2/s}$)")
         plt.title("Diffusion Coefficient vs Aggregate Size")
         plt.grid(True, alpha=0.3)
 
@@ -959,7 +959,7 @@ def plot_sd_analysis(
                 # Convert diffusion coefficient to SI units for annotation position
                 diffusion_coeff_si_val = row["diffusion_coefficient"] * 1e-8
                 plt.annotate(
-                    f'R²={row["r_squared"]:.3f}',
+                    f'$R^2$={row["r_squared"]:.3f}',
                     (row["aggregation_number"], diffusion_coeff_si_val),
                     xytext=(5, 5),
                     textcoords="offset points",
@@ -1348,7 +1348,7 @@ def plot_hydrodynamic_radius_analysis(
         )
 
         plt.xlabel("Aggregation Number")
-        plt.ylabel("Hydrodynamic Radius (Å)")
+        plt.ylabel("Hydrodynamic Radius ($\\mathrm{\\AA}$)")
         plt.title("Hydrodynamic Radius vs Aggregate Size")
         plt.legend()
         plt.tight_layout()
@@ -1485,7 +1485,7 @@ def plot_hydrodynamic_radius_analysis(
                                         d_theory_low[mask_low],
                                         "-",
                                         linewidth=2,
-                                        label=f"Regime 1: η₁ = {eta_1*1000:.2f} ± {eta_1_err*1000:.2f} mPa·s",
+                                        label=f"Regime 1: $\\eta_1$ = {eta_1*1000:.2f} $\\pm$ {eta_1_err*1000:.2f} mPa·s",
                                     )
 
                                 if np.any(mask_high):
@@ -1494,7 +1494,7 @@ def plot_hydrodynamic_radius_analysis(
                                         d_theory_high[mask_high],
                                         "-",
                                         linewidth=2,
-                                        label=f"Regime 2: η₂ = {eta_2*1000:.2f} ± {eta_2_err*1000:.2f} mPa·s",
+                                        label=f"Regime 2: $\\eta_2$ = {eta_2*1000:.2f} $\\pm$ {eta_2_err*1000:.2f} mPa·s",
                                     )
 
                                 # Mark the breakpoint
@@ -1504,7 +1504,7 @@ def plot_hydrodynamic_radius_analysis(
                                     color="gray",
                                     linestyle="--",
                                     alpha=0.7,
-                                    label=f"Breakpoint: {x_break_ang:.1f} Å",
+                                    label=f"Breakpoint: {x_break_ang:.1f} $\\mathrm{{\\AA}}$",
                                 )
                                 plt.plot(
                                     x_break_ang,
@@ -1610,9 +1610,9 @@ def plot_hydrodynamic_radius_analysis(
                             d_theory_si = A * (rh_range_m**exponent)
 
                             if fix_exponent:
-                                fit_label = f"Classical S-E fit: $D = A/R_H$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                                fit_label = f"Classical S-E fit: $D = A/R_H$, $\\eta$ = {eta_fitted*1000:.2f} $\\pm$ {eta_std_err*1000:.2f} mPa·s"
                             else:
-                                fit_label = f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, η = {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                                fit_label = f"Modified S-E fit: $D \\propto R_H^{{{exponent:.2f}}}$, $\\eta$ = {eta_fitted*1000:.2f} $\\pm$ {eta_std_err*1000:.2f} mPa·s"
 
                             plt.plot(
                                 rh_range,
@@ -1643,8 +1643,8 @@ def plot_hydrodynamic_radius_analysis(
                 except Exception as e:
                     print(f"Warning: Could not fit Stokes-Einstein relationship: {e}")
 
-            plt.xlabel("Hydrodynamic Radius (Å)")
-            plt.ylabel("Diffusion Coefficient (m²/s)")
+            plt.xlabel("Hydrodynamic Radius ($\\mathrm{\\AA}$)")
+            plt.ylabel("Diffusion Coefficient ($\\mathrm{m^2/s}$)")
             plt.title("Diffusion Coefficient vs Hydrodynamic Radius")
             plt.legend()
             # plt.yscale("log")
