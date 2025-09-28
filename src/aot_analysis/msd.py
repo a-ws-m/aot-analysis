@@ -1704,6 +1704,18 @@ def plot_hydrodynamic_radius_analysis(
         merged_df = pd.merge(diffusion_df, rh_df, on="aggregation_number", how="inner")
 
         if len(merged_df) > 0:
+            # Filter out values where D - standard_error < 0
+            valid_diffusion_mask = (
+                merged_df["diffusion_coefficient"] - merged_df["diffusion_error"]
+            ) > 0
+            merged_df = merged_df[valid_diffusion_mask]
+
+            if len(merged_df) == 0:
+                print(
+                    "Warning: No valid diffusion data after filtering out negative values (D - σ_D < 0)"
+                )
+                return
+
             plt.figure()
 
             # Convert diffusion coefficients to m²/s for display
@@ -1914,7 +1926,7 @@ def plot_hydrodynamic_radius_analysis(
                             # Convert B to Angstroms for display
                             B_ang = B * 1e10  # m to Å
 
-                            fit_label = f"Offset S-E fit: $D = A/(R_H + \\Delta R_H)$, $\\eta$ = {eta_fitted*1000:.2f} $\\pm$ {eta_std_err*1000:.2f} mPa·s"
+                            fit_label = f"Offset S-E fit:\n$D = A/(R_H + \\Delta R_H)$,\n$\\eta$ = {eta_fitted*1000:.2f} $\\pm$ {eta_std_err*1000:.2f} mPa·s"
 
                             plt.plot(
                                 rh_range,
@@ -2036,7 +2048,7 @@ def plot_hydrodynamic_radius_analysis(
             plt.ylabel("Diffusion Coefficient ($\\mathrm{m^2/s}$)")
             plt.title("Diffusion Coefficient vs Hydrodynamic Radius")
             plt.legend()
-            # plt.yscale("log")
+            plt.yscale("log")
             # plt.xscale("log")
             plt.tight_layout()
 
