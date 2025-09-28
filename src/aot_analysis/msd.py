@@ -1148,10 +1148,11 @@ def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si, d_err_si=None):
     }
 
 
-def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None):
+def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None, rh_err_m=None):
     """
     Fit the offset Stokes-Einstein relationship D = A / (R_H + B)
-    using constrained weighted least squares to ensure (R_H + B) > 0 for all data points.
+    using Orthogonal Distance Regression (ODR) to account for uncertainties
+    in both hydrodynamic radius and diffusion coefficient.
 
     This model includes an offset B (displayed as ΔR_H) that accounts for
     additional hydrodynamic effects beyond the simple 1/R_H relationship.
@@ -1164,7 +1165,10 @@ def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None):
         Diffusion coefficients in m²/s
     d_err_si : array-like, optional
         Standard errors of diffusion coefficients in m²/s
-        If None, uses unweighted least squares
+        If None, assumes no uncertainty in y-direction
+    rh_err_m : array-like, optional
+        Standard errors of hydrodynamic radii in meters
+        If None, assumes no uncertainty in x-direction
 
     Returns
     -------
@@ -1175,67 +1179,79 @@ def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None):
         - B: Offset parameter (ΔR_H) in meters
         - B_std_err: Standard error of B
         - r_squared: Coefficient of determination
+        - chi_squared_reduced: Reduced chi-squared statistic
         - effective_viscosity: Calculated viscosity in Pa·s
         - effective_viscosity_err: Error in viscosity
     """
+    from scipy import odr
     from scipy.constants import k as k_B
-    from scipy.optimize import minimize
     from sklearn.metrics import r2_score
 
     # Ensure inputs are numpy arrays
     rh_fit_m = np.array(rh_fit_m)
     d_fit_si = np.array(d_fit_si)
 
-    # Calculate weights for WLS
+    # Handle error arrays
     if d_err_si is not None:
         d_err_si = np.array(d_err_si)
-        # Weights are 1/var(D) = 1/(sigma_D)^2
-        weights = 1.0 / (
-            d_err_si**2 + 1e-12
-        )  # Add small epsilon to avoid division by zero
-
-        # Avoid infinite weights
-        weights = np.where(np.isfinite(weights), weights, 1.0)
-        weights = np.where(weights > 0, weights, 1.0)
+        # Ensure no zero or negative errors
+        d_err_si = np.where(
+            d_err_si <= 0, np.mean(d_err_si[d_err_si > 0]) * 0.1, d_err_si
+        )
     else:
-        weights = np.ones_like(d_fit_si)
+        # Default to 5% relative error if none provided
+        d_err_si = np.abs(d_fit_si) * 0.05
+
+    if rh_err_m is not None:
+        rh_err_m = np.array(rh_err_m)
+        # Ensure no zero or negative errors
+        rh_err_m = np.where(
+            rh_err_m <= 0, np.mean(rh_err_m[rh_err_m > 0]) * 0.1, rh_err_m
+        )
+    else:
+        # Default to 5% relative error if none provided
+        rh_err_m = np.abs(rh_fit_m) * 0.05
 
     # Define constraint: B > -min(R_H) + small_margin to ensure (R_H + B) > 0
     min_rh = np.min(rh_fit_m)
     B_min = -min_rh + min_rh * 0.01  # Add 1% margin for safety
 
-    def objective(params):
-        """Objective function to minimize (weighted sum of squared residuals)"""
+    def offset_stokes_einstein_model(params, x):
+        """
+        Model function for ODR: D = A / (R_H + B)
+
+        Parameters
+        ----------
+        params : array-like
+            [A, B] parameters
+        x : array-like
+            Hydrodynamic radii
+
+        Returns
+        -------
+        array-like
+            Predicted diffusion coefficients
+        """
         A, B = params
 
-        # Ensure physical constraints
-        if A <= 0:
-            return 1e10
-        if B <= B_min:
-            return 1e10
+        # Ensure positivity constraint
+        denominators = x + B
+        # Clip to small positive value to avoid division by zero
+        denominators = np.where(denominators <= 0, 1e-15, denominators)
 
-        # Check that all denominators are positive
-        denominators = rh_fit_m + B
-        if np.any(denominators <= 0):
-            return 1e10
+        return A / denominators
 
-        try:
-            # Calculate predictions: D = A / (R_H + B)
-            d_pred = A / denominators
-            residuals = d_fit_si - d_pred
-
-            # Use weighted sum of squared residuals
-            return np.sum(weights * residuals**2)
-        except:
-            return 1e10
-
-    # Initial guess: start with simple linear regression and adjust if needed
+    # Get initial parameter estimates using constrained least squares
     try:
-        # Try unconstrained fit first to get initial guess
         from sklearn.linear_model import LinearRegression
 
+        # Transform to linear form: 1/D = (1/A) * R_H + B/A
         y_linear = 1.0 / d_fit_si
         X_linear = rh_fit_m.reshape(-1, 1)
+
+        # Use inverse variance weighting
+        weights = 1.0 / (d_err_si**2)
+        weights = np.where(np.isfinite(weights), weights, 1.0)
 
         regressor = LinearRegression(fit_intercept=True)
         regressor.fit(X_linear, y_linear, sample_weight=weights)
@@ -1248,102 +1264,114 @@ def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None):
 
         # Ensure initial B satisfies constraint
         if B_init <= B_min:
-            B_init = B_min + min_rh * 0.1  # Set to 10% above minimum
+            B_init = B_min + min_rh * 0.1
 
     except:
         # Fallback initial guess
         A_init = np.mean(d_fit_si * rh_fit_m)
         B_init = B_min + min_rh * 0.1
 
-    # Bounds for optimization
-    A_max = A_init * 100  # Allow A to vary widely
-    B_max = min_rh * 10  # Allow B to be positive up to 10x min radius
+    # Set up ODR
+    model = odr.Model(offset_stokes_einstein_model, implicit=False)
+    data = odr.RealData(rh_fit_m, d_fit_si, sx=rh_err_m, sy=d_err_si)
 
-    bounds = [
-        (A_init * 0.01, A_max),  # A bounds (must be positive)
-        (B_min * 1.001, B_max),  # B bounds (must ensure positivity)
-    ]
+    # Create ODR object with initial parameter estimates
+    odr_obj = odr.ODR(data, model, beta0=[A_init, B_init])
 
-    # Perform constrained optimization
+    # Set ODR control parameters
+    odr_obj.set_job(fit_type=0)  # Explicit ODR
+
     try:
-        x0 = [A_init, B_init]
-        result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B")
+        # Run ODR with constraint handling
+        # First try standard ODR
+        output = odr_obj.run()
 
-        if not result.success:
-            # Try different initial guess
-            B_init_alt = 0.0  # Try zero offset
-            if B_init_alt > B_min:
-                x0_alt = [A_init, B_init_alt]
-                result = minimize(objective, x0_alt, bounds=bounds, method="L-BFGS-B")
+        A_opt, B_opt = output.beta
 
-        if not result.success:
-            raise RuntimeError(f"Optimization failed: {result.message}")
+        # Check if constraints are satisfied
+        if A_opt <= 0 or B_opt <= B_min or np.any(rh_fit_m + B_opt <= 0):
+            # If constraints violated, use constrained approach
+            print("Standard ODR violated constraints, using penalty method...")
 
-        A_opt, B_opt = result.x
+            # Use penalty method by modifying the model
+            def constrained_model(params, x):
+                A, B = params
+
+                # Apply soft constraints
+                A_safe = np.maximum(A, 1e-12)  # Ensure positive A
+                B_safe = np.maximum(B, B_min + 1e-12)  # Ensure constraint
+
+                denominators = x + B_safe
+                denominators = np.maximum(denominators, 1e-15)  # Avoid division by zero
+
+                return A_safe / denominators
+
+            model_constrained = odr.Model(constrained_model, implicit=False)
+            odr_obj_constrained = odr.ODR(
+                data,
+                model_constrained,
+                beta0=[abs(A_init), max(B_init, B_min + min_rh * 0.1)],
+            )
+            output = odr_obj_constrained.run()
+            A_opt, B_opt = output.beta
+
+        # Extract parameter uncertainties
+        if output.sd_beta is not None:
+            A_std_err, B_std_err = output.sd_beta
+        else:
+            # Fallback error estimation
+            A_std_err = abs(A_opt) * 0.1
+            B_std_err = abs(B_opt) * 0.1
 
     except Exception as e:
-        print(f"Warning: Constrained offset fit failed: {e}")
-        return None
+        print(f"Warning: ODR fitting failed: {e}")
+        print("Falling back to constrained least squares...")
+
+        # Fallback to the original constrained optimization approach
+        from scipy.optimize import minimize
+
+        def objective(params):
+            A, B = params
+            if A <= 0 or B <= B_min or np.any(rh_fit_m + B <= 0):
+                return 1e10
+            try:
+                d_pred = A / (rh_fit_m + B)
+                residuals = d_fit_si - d_pred
+                weights = 1.0 / (d_err_si**2 + 1e-12)
+                return np.sum(weights * residuals**2)
+            except:
+                return 1e10
+
+        bounds = [(A_init * 0.01, A_init * 100), (B_min * 1.001, min_rh * 10)]
+        result = minimize(objective, [A_init, B_init], bounds=bounds, method="L-BFGS-B")
+
+        if not result.success:
+            return None
+
+        A_opt, B_opt = result.x
+        # Simple error estimates
+        A_std_err = abs(A_opt) * 0.1
+        B_std_err = abs(B_opt) * 0.1
 
     # Calculate predictions and fit statistics
     d_pred = A_opt / (rh_fit_m + B_opt)
     residuals = d_fit_si - d_pred
 
-    # Calculate R² using weighted statistics
-    weighted_mean_d = np.average(d_fit_si, weights=weights)
-    ss_res_weighted = np.sum(weights * residuals**2)
-    ss_tot_weighted = np.sum(weights * (d_fit_si - weighted_mean_d) ** 2)
-    r_squared = 1 - (ss_res_weighted / ss_tot_weighted) if ss_tot_weighted > 0 else 0.0
+    # Calculate R²
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((d_fit_si - np.mean(d_fit_si)) ** 2)
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
-    # Estimate parameter uncertainties using finite differences around the optimum
-    # This is an approximation since we used constrained optimization
-    eps_A = A_opt * 1e-6
-    eps_B = abs(B_opt) * 1e-6 if B_opt != 0 else min_rh * 1e-6
-
-    # Calculate second derivatives (Hessian approximation)
-    try:
-        f0 = objective([A_opt, B_opt])
-
-        # Second derivative w.r.t. A
-        f_A_plus = objective([A_opt + eps_A, B_opt])
-        f_A_minus = objective([A_opt - eps_A, B_opt])
-        d2f_dA2 = (f_A_plus - 2 * f0 + f_A_minus) / (eps_A**2)
-
-        # Second derivative w.r.t. B
-        f_B_plus = objective([A_opt, B_opt + eps_B])
-        f_B_minus = objective([A_opt, B_opt - eps_B])
-        d2f_dB2 = (f_B_plus - 2 * f0 + f_B_minus) / (eps_B**2)
-
-        # Mixed derivative
-        f_AB = objective([A_opt + eps_A, B_opt + eps_B])
-        f_A = objective([A_opt + eps_A, B_opt])
-        f_B = objective([A_opt, B_opt + eps_B])
-        d2f_dAdB = (f_AB - f_A - f_B + f0) / (eps_A * eps_B)
-
-        # Construct Hessian matrix
-        hessian = np.array([[d2f_dA2, d2f_dAdB], [d2f_dAdB, d2f_dB2]])
-
-        # Covariance matrix is the inverse of the Hessian (for large samples)
-        if np.linalg.det(hessian) > 1e-10:
-            cov_matrix = np.linalg.inv(hessian)
-            A_std_err = np.sqrt(abs(cov_matrix[0, 0]))
-            B_std_err = np.sqrt(abs(cov_matrix[1, 1]))
-        else:
-            # Fallback: use simple scaling based on residuals
-            mse = np.sum(weights * residuals**2) / len(residuals)
-            A_std_err = np.sqrt(mse) * A_opt / np.sqrt(len(residuals))
-            B_std_err = np.sqrt(mse) * abs(B_opt) / np.sqrt(len(residuals))
-
-    except:
-        # Simple fallback error estimates
-        mse = np.sum(weights * residuals**2) / len(residuals)
-        A_std_err = np.sqrt(mse) * A_opt / np.sqrt(len(residuals))
-        B_std_err = np.sqrt(mse) * abs(B_opt) / np.sqrt(len(residuals))
+    # Calculate reduced chi-squared
+    # χ² = Σ[(y_i - f(x_i))² / σ_y² + (x_i - x_i_fit)² / σ_x²]
+    # For now, approximate as χ² ≈ Σ[(y_i - f(x_i))² / σ_y²]
+    chi_squared = np.sum((residuals / d_err_si) ** 2)
+    degrees_of_freedom = len(d_fit_si) - 2  # 2 parameters (A, B)
+    chi_squared_reduced = (
+        chi_squared / degrees_of_freedom if degrees_of_freedom > 0 else np.inf
+    )
 
     # Calculate effective viscosity using Stokes-Einstein relation
-    # D = k_B * T / (6 * π * η * R_eff) where R_eff = R_H + B
-    # For D = A / (R_H + B), we have A = k_B * T / (6 * π * η)
-    # So η = k_B * T / (6 * π * A)
     T = 298.15  # Default temperature in K
     effective_viscosity = k_B * T / (6 * np.pi * A_opt)  # Pa·s
 
@@ -1363,6 +1391,7 @@ def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None):
         "B": B_opt,  # This is ΔR_H in meters
         "B_std_err": B_std_err,
         "r_squared": r_squared,
+        "chi_squared_reduced": chi_squared_reduced,
         "effective_viscosity": effective_viscosity,
         "effective_viscosity_err": effective_viscosity_err,
         "B_min_constraint": B_min,  # Include constraint info for debugging
@@ -1639,7 +1668,7 @@ def plot_hydrodynamic_radius_analysis(
         If True, fit offset Stokes-Einstein relationship D = A/(R_H + B)
     """
     # Plot options
-    sns.set_palette("Dark2")
+    # sns.set_palette("Dark2")
 
     # Plot 1: Hydrodynamic radius vs aggregation number
     if len(rh_df) > 0:
@@ -1712,6 +1741,10 @@ def plot_hydrodynamic_radius_analysis(
                     d_err_values = np.array(merged_df["diffusion_error"])  # Å²/ps
                     d_err_values_si = d_err_values * 1e-8  # Å²/ps to m²/s
 
+                    # Get hydrodynamic radius errors for ODR fitting
+                    rh_err_values = np.array(merged_df["hydrodynamic_radius_std"])  # Å
+                    rh_err_values_m = rh_err_values * 1e-10  # Å to m
+
                     # Filter out any non-positive values
                     valid_mask = (rh_values > 0) & (d_values > 0)
                     if np.sum(valid_mask) >= 3:
@@ -1720,6 +1753,7 @@ def plot_hydrodynamic_radius_analysis(
                         rh_fit_m = rh_values_m[valid_mask]
                         d_fit_si = d_values_si[valid_mask]
                         d_err_fit_si = d_err_values_si[valid_mask]
+                        rh_err_fit_m = rh_err_values_m[valid_mask]
 
                         if two_regime:
 
@@ -1861,7 +1895,7 @@ def plot_hydrodynamic_radius_analysis(
                         elif offset_se:
                             # Fit offset Stokes-Einstein relationship: D = A / (R_H + B)
                             fit_result = fit_stokes_einstein_offset(
-                                rh_fit_m, d_fit_si, d_err_fit_si
+                                rh_fit_m, d_fit_si, d_err_fit_si, rh_err_fit_m
                             )
 
                             A = fit_result["A"]
@@ -1890,7 +1924,7 @@ def plot_hydrodynamic_radius_analysis(
                                 label=fit_label,
                             )
 
-                            print(f"Offset Stokes-Einstein fit results:")
+                            print(f"Offset Stokes-Einstein fit results (ODR):")
                             print(f"  Prefactor A: {A:.2e} ± {A_std_err:.2e} m²/s")
                             print(
                                 f"  Offset ΔR_H: {B_ang:.2f} ± {B_std_err*1e10:.2f} Å"
@@ -1901,6 +1935,7 @@ def plot_hydrodynamic_radius_analysis(
                             print(f"  η: {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
                             print(f"  Temperature: {temperature:.1f} K")
                             print(f"  R² = {r_squared:.3f}")
+                            print(f"  χ²ᵣₑd = {fit_result['chi_squared_reduced']:.3f}")
 
                         if not two_regime and not offset_se:
                             # Single-regime fitting (original code)
