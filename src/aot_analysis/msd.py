@@ -1283,86 +1283,87 @@ def fit_two_regime_stokes_einstein(rh_fit_m, d_fit_si, d_err_si=None):
     ss_tot_weighted = np.sum(weights * (d_sorted - weighted_mean_d) ** 2)
     r_squared = 1 - (ss_res_weighted / ss_tot_weighted) if ss_tot_weighted > 0 else 0
 
-    # Estimate parameter uncertainties using finite differences
-    def estimate_parameter_errors(params, rh, d, w):
-        """Estimate parameter uncertainties using the Hessian approximation with weights"""
-        eps = 1e-6
-        n_params = len(params)
-        hessian = np.zeros((n_params, n_params))
+    # Estimate parameter uncertainties using regime-specific weighted least squares
+    # Assume breakpoint error is zero and calculate errors for each regime separately
 
-        def local_objective(p):
-            try:
-                y_pred = two_regime_model(p, rh)
-                residuals = d - y_pred
-                return np.sum(w * residuals**2)
-            except:
-                return 1e10
+    # Split data into two regimes based on optimal breakpoint
+    mask_low = rh_sorted < x_opt
+    mask_high = rh_sorted >= x_opt
 
-        # Approximate Hessian using finite differences
-        for i in range(n_params):
-            for j in range(n_params):
-                if i == j:
-                    # Second derivative
-                    p_plus = params.copy()
-                    p_minus = params.copy()
-                    p_plus[i] += eps
-                    p_minus[i] -= eps
+    rh_low = rh_sorted[mask_low]
+    d_low = d_sorted[mask_low]
+    w_low = weights[mask_low]
 
-                    f_plus = local_objective(p_plus)
-                    f_center = local_objective(params)
-                    f_minus = local_objective(p_minus)
+    rh_high = rh_sorted[mask_high]
+    d_high = d_sorted[mask_high]
+    w_high = weights[mask_high]
 
-                    hessian[i, j] = (f_plus - 2 * f_center + f_minus) / (eps**2)
-                else:
-                    # Mixed partial derivative
-                    p_pp = params.copy()
-                    p_pm = params.copy()
-                    p_mp = params.copy()
-                    p_mm = params.copy()
+    # Set breakpoint error to zero (as requested)
+    x_err = 0.0
 
-                    p_pp[i] += eps
-                    p_pp[j] += eps
-                    p_pm[i] += eps
-                    p_pm[j] -= eps
-                    p_mp[i] -= eps
-                    p_mp[j] += eps
-                    p_mm[i] -= eps
-                    p_mm[j] -= eps
+    # Calculate A_2 error from high regime: D = A_2 / R_H
+    # Transform to linear form: D * R_H = A_2
+    if len(rh_high) >= 2:
+        # For the high regime, we fit D = A_2 / R_H
+        # This is equivalent to fitting (D * R_H) = A_2 (constant)
+        y_high_transformed = d_high * rh_high  # D * R_H = A_2
 
-                    hessian[i, j] = (
-                        local_objective(p_pp)
-                        - local_objective(p_pm)
-                        - local_objective(p_mp)
-                        + local_objective(p_mm)
-                    ) / (4 * eps**2)
+        # Weighted mean and standard error
+        if np.sum(w_high) > 0:
+            A_2_weighted_mean = np.average(y_high_transformed, weights=w_high)
+            # Weighted variance: Var = sum(w * (x - x_mean)^2) / sum(w)
+            weighted_var_high = np.average(
+                (y_high_transformed - A_2_weighted_mean) ** 2, weights=w_high
+            )
+            # Standard error of weighted mean: SE = sqrt(Var / N_eff) where N_eff = (sum(w))^2 / sum(w^2)
+            sum_w_high = np.sum(w_high)
+            sum_w2_high = np.sum(w_high**2)
+            n_eff_high = (sum_w_high**2) / sum_w2_high if sum_w2_high > 0 else 1
+            A_2_err = np.sqrt(weighted_var_high / n_eff_high) if n_eff_high > 1 else 0.0
+        else:
+            A_2_err = 0.0
+    else:
+        A_2_err = 0.0
 
-        try:
-            # Covariance matrix is inverse of Hessian/2 (for weighted least squares)
-            # Use weighted MSE for scaling
-            weighted_mse = ss_res_weighted / (len(rh) - n_params)
-            cov_matrix = np.linalg.inv(hessian / 2) * weighted_mse
-            param_errors = np.sqrt(np.diag(cov_matrix))
-            return param_errors, cov_matrix
-        except:
-            # If Hessian is singular, use a simple approximation
-            return np.array([0.1 * abs(p) for p in params]), np.eye(n_params)
+    # Calculate B error from low regime: D = A_1 / R_H + B = (A_2 - B*x) / R_H + B
+    # Rearranging: D = A_2 / R_H + B * (1 - x / R_H)
+    # This is linear in B: D - A_2 / R_H = B * (1 - x / R_H)
+    if len(rh_low) >= 2:
+        # Calculate the design matrix for the low regime
+        X_low = 1.0 - x_opt / rh_low  # Coefficient of B
+        y_low_residual = d_low - A_2_opt / rh_low  # D - A_2 / R_H
 
-    param_errors, cov_matrix = estimate_parameter_errors(
-        [A_2_opt, x_opt, B_opt], rh_sorted, d_sorted, weights
-    )
-    A_2_err, x_err, B_err = param_errors
+        # Weighted least squares for B
+        if np.sum(w_low) > 0 and np.sum(w_low * X_low**2) > 0:
+            # B = sum(w * X * y) / sum(w * X^2)
+            B_weighted = np.sum(w_low * X_low * y_low_residual) / np.sum(
+                w_low * X_low**2
+            )
 
-    # Propagate error to A_1 = A_2 - B * x
-    # Var(A_1) = Var(A_2) + x^2 * Var(B) + B^2 * Var(x) - 2*x*Cov(A_2,B) + 2*B*Cov(A_2,x) - 2*x*B*Cov(B,x)
-    A_1_var = (
-        A_2_err**2
-        + (x_opt * B_err) ** 2
-        + (B_opt * x_err) ** 2
-        - 2 * x_opt * cov_matrix[0, 2]  # Cov(A_2, B)
-        + 2 * B_opt * cov_matrix[0, 1]  # Cov(A_2, x)
-        - 2 * x_opt * B_opt * cov_matrix[1, 2]
-    )  # Cov(x, B)
-    A_1_err = np.sqrt(max(0, A_1_var))
+            # Calculate residuals and MSE
+            y_pred_low = B_weighted * X_low
+            residuals_low = y_low_residual - y_pred_low
+            weighted_mse_low = np.sum(w_low * residuals_low**2) / np.sum(w_low)
+
+            # Standard error of B: SE_B = sqrt(MSE / sum(w * X^2))
+            B_err = (
+                np.sqrt(weighted_mse_low / np.sum(w_low * X_low**2))
+                if weighted_mse_low > 0
+                else 0.0
+            )
+        else:
+            B_err = 0.0
+    else:
+        B_err = 0.0
+
+    # Calculate A_1 error using error propagation: A_1 = A_2 - B * x
+    # Since x_err = 0, Var(A_1) = Var(A_2) + x^2 * Var(B)
+    A_1_err = np.sqrt(A_2_err**2 + (x_opt * B_err) ** 2)
+
+    # Ensure all errors are finite
+    A_2_err = A_2_err if np.isfinite(A_2_err) else 0.0
+    B_err = B_err if np.isfinite(B_err) else 0.0
+    A_1_err = A_1_err if np.isfinite(A_1_err) else 0.0
 
     # Count points in each regime
     n_low = np.sum(rh_sorted < x_opt)
