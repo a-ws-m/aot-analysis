@@ -1148,6 +1148,228 @@ def fit_stokes_einstein_variable_exponent(rh_fit_m, d_fit_si, d_err_si=None):
     }
 
 
+def fit_stokes_einstein_offset(rh_fit_m, d_fit_si, d_err_si=None):
+    """
+    Fit the offset Stokes-Einstein relationship D = A / (R_H + B)
+    using constrained weighted least squares to ensure (R_H + B) > 0 for all data points.
+
+    This model includes an offset B (displayed as ΔR_H) that accounts for
+    additional hydrodynamic effects beyond the simple 1/R_H relationship.
+
+    Parameters
+    ----------
+    rh_fit_m : array-like
+        Hydrodynamic radii in meters
+    d_fit_si : array-like
+        Diffusion coefficients in m²/s
+    d_err_si : array-like, optional
+        Standard errors of diffusion coefficients in m²/s
+        If None, uses unweighted least squares
+
+    Returns
+    -------
+    dict
+        Fitted parameters, uncertainties, and fit statistics:
+        - A: Proportionality constant
+        - A_std_err: Standard error of A
+        - B: Offset parameter (ΔR_H) in meters
+        - B_std_err: Standard error of B
+        - r_squared: Coefficient of determination
+        - effective_viscosity: Calculated viscosity in Pa·s
+        - effective_viscosity_err: Error in viscosity
+    """
+    from scipy.constants import k as k_B
+    from scipy.optimize import minimize
+    from sklearn.metrics import r2_score
+
+    # Ensure inputs are numpy arrays
+    rh_fit_m = np.array(rh_fit_m)
+    d_fit_si = np.array(d_fit_si)
+
+    # Calculate weights for WLS
+    if d_err_si is not None:
+        d_err_si = np.array(d_err_si)
+        # Weights are 1/var(D) = 1/(sigma_D)^2
+        weights = 1.0 / (
+            d_err_si**2 + 1e-12
+        )  # Add small epsilon to avoid division by zero
+
+        # Avoid infinite weights
+        weights = np.where(np.isfinite(weights), weights, 1.0)
+        weights = np.where(weights > 0, weights, 1.0)
+    else:
+        weights = np.ones_like(d_fit_si)
+
+    # Define constraint: B > -min(R_H) + small_margin to ensure (R_H + B) > 0
+    min_rh = np.min(rh_fit_m)
+    B_min = -min_rh + min_rh * 0.01  # Add 1% margin for safety
+
+    def objective(params):
+        """Objective function to minimize (weighted sum of squared residuals)"""
+        A, B = params
+
+        # Ensure physical constraints
+        if A <= 0:
+            return 1e10
+        if B <= B_min:
+            return 1e10
+
+        # Check that all denominators are positive
+        denominators = rh_fit_m + B
+        if np.any(denominators <= 0):
+            return 1e10
+
+        try:
+            # Calculate predictions: D = A / (R_H + B)
+            d_pred = A / denominators
+            residuals = d_fit_si - d_pred
+
+            # Use weighted sum of squared residuals
+            return np.sum(weights * residuals**2)
+        except:
+            return 1e10
+
+    # Initial guess: start with simple linear regression and adjust if needed
+    try:
+        # Try unconstrained fit first to get initial guess
+        from sklearn.linear_model import LinearRegression
+
+        y_linear = 1.0 / d_fit_si
+        X_linear = rh_fit_m.reshape(-1, 1)
+
+        regressor = LinearRegression(fit_intercept=True)
+        regressor.fit(X_linear, y_linear, sample_weight=weights)
+
+        slope_init = regressor.coef_[0]  # slope = 1/A
+        intercept_init = regressor.intercept_  # intercept = B/A
+
+        A_init = 1.0 / slope_init if slope_init > 0 else np.mean(d_fit_si * rh_fit_m)
+        B_init = intercept_init * A_init
+
+        # Ensure initial B satisfies constraint
+        if B_init <= B_min:
+            B_init = B_min + min_rh * 0.1  # Set to 10% above minimum
+
+    except:
+        # Fallback initial guess
+        A_init = np.mean(d_fit_si * rh_fit_m)
+        B_init = B_min + min_rh * 0.1
+
+    # Bounds for optimization
+    A_max = A_init * 100  # Allow A to vary widely
+    B_max = min_rh * 10  # Allow B to be positive up to 10x min radius
+
+    bounds = [
+        (A_init * 0.01, A_max),  # A bounds (must be positive)
+        (B_min * 1.001, B_max),  # B bounds (must ensure positivity)
+    ]
+
+    # Perform constrained optimization
+    try:
+        x0 = [A_init, B_init]
+        result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B")
+
+        if not result.success:
+            # Try different initial guess
+            B_init_alt = 0.0  # Try zero offset
+            if B_init_alt > B_min:
+                x0_alt = [A_init, B_init_alt]
+                result = minimize(objective, x0_alt, bounds=bounds, method="L-BFGS-B")
+
+        if not result.success:
+            raise RuntimeError(f"Optimization failed: {result.message}")
+
+        A_opt, B_opt = result.x
+
+    except Exception as e:
+        print(f"Warning: Constrained offset fit failed: {e}")
+        return None
+
+    # Calculate predictions and fit statistics
+    d_pred = A_opt / (rh_fit_m + B_opt)
+    residuals = d_fit_si - d_pred
+
+    # Calculate R² using weighted statistics
+    weighted_mean_d = np.average(d_fit_si, weights=weights)
+    ss_res_weighted = np.sum(weights * residuals**2)
+    ss_tot_weighted = np.sum(weights * (d_fit_si - weighted_mean_d) ** 2)
+    r_squared = 1 - (ss_res_weighted / ss_tot_weighted) if ss_tot_weighted > 0 else 0.0
+
+    # Estimate parameter uncertainties using finite differences around the optimum
+    # This is an approximation since we used constrained optimization
+    eps_A = A_opt * 1e-6
+    eps_B = abs(B_opt) * 1e-6 if B_opt != 0 else min_rh * 1e-6
+
+    # Calculate second derivatives (Hessian approximation)
+    try:
+        f0 = objective([A_opt, B_opt])
+
+        # Second derivative w.r.t. A
+        f_A_plus = objective([A_opt + eps_A, B_opt])
+        f_A_minus = objective([A_opt - eps_A, B_opt])
+        d2f_dA2 = (f_A_plus - 2 * f0 + f_A_minus) / (eps_A**2)
+
+        # Second derivative w.r.t. B
+        f_B_plus = objective([A_opt, B_opt + eps_B])
+        f_B_minus = objective([A_opt, B_opt - eps_B])
+        d2f_dB2 = (f_B_plus - 2 * f0 + f_B_minus) / (eps_B**2)
+
+        # Mixed derivative
+        f_AB = objective([A_opt + eps_A, B_opt + eps_B])
+        f_A = objective([A_opt + eps_A, B_opt])
+        f_B = objective([A_opt, B_opt + eps_B])
+        d2f_dAdB = (f_AB - f_A - f_B + f0) / (eps_A * eps_B)
+
+        # Construct Hessian matrix
+        hessian = np.array([[d2f_dA2, d2f_dAdB], [d2f_dAdB, d2f_dB2]])
+
+        # Covariance matrix is the inverse of the Hessian (for large samples)
+        if np.linalg.det(hessian) > 1e-10:
+            cov_matrix = np.linalg.inv(hessian)
+            A_std_err = np.sqrt(abs(cov_matrix[0, 0]))
+            B_std_err = np.sqrt(abs(cov_matrix[1, 1]))
+        else:
+            # Fallback: use simple scaling based on residuals
+            mse = np.sum(weights * residuals**2) / len(residuals)
+            A_std_err = np.sqrt(mse) * A_opt / np.sqrt(len(residuals))
+            B_std_err = np.sqrt(mse) * abs(B_opt) / np.sqrt(len(residuals))
+
+    except:
+        # Simple fallback error estimates
+        mse = np.sum(weights * residuals**2) / len(residuals)
+        A_std_err = np.sqrt(mse) * A_opt / np.sqrt(len(residuals))
+        B_std_err = np.sqrt(mse) * abs(B_opt) / np.sqrt(len(residuals))
+
+    # Calculate effective viscosity using Stokes-Einstein relation
+    # D = k_B * T / (6 * π * η * R_eff) where R_eff = R_H + B
+    # For D = A / (R_H + B), we have A = k_B * T / (6 * π * η)
+    # So η = k_B * T / (6 * π * A)
+    T = 298.15  # Default temperature in K
+    effective_viscosity = k_B * T / (6 * np.pi * A_opt)  # Pa·s
+
+    # Error in viscosity: σ_η = (k_B * T / (6 * π)) * σ_A / A²
+    effective_viscosity_err = (k_B * T / (6 * np.pi)) * A_std_err / (A_opt**2)
+
+    # Ensure all errors are finite
+    A_std_err = A_std_err if np.isfinite(A_std_err) else 0.0
+    B_std_err = B_std_err if np.isfinite(B_std_err) else 0.0
+    effective_viscosity_err = (
+        effective_viscosity_err if np.isfinite(effective_viscosity_err) else 0.0
+    )
+
+    return {
+        "A": A_opt,
+        "A_std_err": A_std_err,
+        "B": B_opt,  # This is ΔR_H in meters
+        "B_std_err": B_std_err,
+        "r_squared": r_squared,
+        "effective_viscosity": effective_viscosity,
+        "effective_viscosity_err": effective_viscosity_err,
+        "B_min_constraint": B_min,  # Include constraint info for debugging
+        "min_rh_plus_B": np.min(rh_fit_m + B_opt),  # Verify positivity
+    }
+
+
 def fit_two_regime_stokes_einstein(rh_fit_m, d_fit_si, d_err_si=None):
     """
     Fit a two-regime Stokes-Einstein relationship:
@@ -1393,6 +1615,7 @@ def plot_hydrodynamic_radius_analysis(
     temperature: float = 298.15,  # K
     fix_exponent: bool = False,
     two_regime: bool = False,
+    offset_se: bool = False,
 ):
     """Create plots for hydrodynamic radius analysis and calculate effective viscosity.
 
@@ -1412,6 +1635,8 @@ def plot_hydrodynamic_radius_analysis(
         If True, fix the Stokes-Einstein exponent to -1 and use HuberRegressor for outlier handling
     two_regime : bool, default=False
         If True, fit a two-regime Stokes-Einstein relationship
+    offset_se : bool, default=False
+        If True, fit offset Stokes-Einstein relationship D = A/(R_H + B)
     """
     # Plot options
     sns.set_palette("Dark2")
@@ -1633,7 +1858,51 @@ def plot_hydrodynamic_radius_analysis(
                                 )
                                 two_regime = False  # Fall back to single regime
 
-                        if not two_regime:
+                        elif offset_se:
+                            # Fit offset Stokes-Einstein relationship: D = A / (R_H + B)
+                            fit_result = fit_stokes_einstein_offset(
+                                rh_fit_m, d_fit_si, d_err_fit_si
+                            )
+
+                            A = fit_result["A"]
+                            A_std_err = fit_result["A_std_err"]
+                            B = fit_result["B"]  # This is ΔR_H in meters
+                            B_std_err = fit_result["B_std_err"]
+                            r_squared = fit_result["r_squared"]
+                            eta_fitted = fit_result["effective_viscosity"]
+                            eta_std_err = fit_result["effective_viscosity_err"]
+
+                            # Generate theoretical curve
+                            rh_range = np.linspace(rh_fit.min(), rh_fit.max(), 100)
+                            rh_range_m = rh_range * 1e-10  # Convert to m
+                            d_theory_si = A / (rh_range_m + B)
+
+                            # Convert B to Angstroms for display
+                            B_ang = B * 1e10  # m to Å
+
+                            fit_label = f"Offset S-E fit: $D = A/(R_H + \\Delta R_H)$, $\\eta$ = {eta_fitted*1000:.2f} $\\pm$ {eta_std_err*1000:.2f} mPa·s"
+
+                            plt.plot(
+                                rh_range,
+                                d_theory_si,
+                                "-",
+                                linewidth=2,
+                                label=fit_label,
+                            )
+
+                            print(f"Offset Stokes-Einstein fit results:")
+                            print(f"  Prefactor A: {A:.2e} ± {A_std_err:.2e} m²/s")
+                            print(
+                                f"  Offset ΔR_H: {B_ang:.2f} ± {B_std_err*1e10:.2f} Å"
+                            )
+                            print(
+                                f"  Effective viscosity η: {eta_fitted*1000:.2f} ± {eta_std_err*1000:.2f} mPa·s"
+                            )
+                            print(f"  η: {eta_fitted:.2e} ± {eta_std_err:.2e} Pa·s")
+                            print(f"  Temperature: {temperature:.1f} K")
+                            print(f"  R² = {r_squared:.3f}")
+
+                        if not two_regime and not offset_se:
                             # Single-regime fitting (original code)
                             if fix_exponent:
                                 fit_result = fit_stokes_einstein_fixed_exponent(
@@ -1737,8 +2006,20 @@ def plot_hydrodynamic_radius_analysis(
             plt.tight_layout()
 
             if output_dir:
+                # Generate filename based on fitting method
+                if two_regime:
+                    filename_suffix = "_two_regime"
+                elif offset_se:
+                    filename_suffix = "_offset"
+                elif fix_exponent:
+                    filename_suffix = "_fixed_exponent"
+                else:
+                    filename_suffix = "_variable_exponent"
+
                 plt.savefig(
-                    f"{output_dir}/diffusion_vs_rh.pdf", dpi=300, bbox_inches="tight"
+                    f"{output_dir}/diffusion_vs_rh{filename_suffix}.pdf",
+                    dpi=300,
+                    bbox_inches="tight",
                 )
             if show_plots:
                 plt.show()
@@ -1883,6 +2164,11 @@ def main():
         "--two-regime-se",
         action="store_true",
         help="Fit a two-regime Stokes-Einstein relationship with breakpoint",
+    )
+    parser.add_argument(
+        "--offset-se",
+        action="store_true",
+        help="Fit offset Stokes-Einstein relationship D = A/(R_H + ΔR_H)",
     )
     parser.add_argument(
         "--use-oseen",
@@ -2174,6 +2460,7 @@ def main():
                 temperature=args.temperature,
                 fix_exponent=args.fix_exponent,
                 two_regime=args.two_regime_se,
+                offset_se=args.offset_se,
             )
 
             if not args.quiet:
