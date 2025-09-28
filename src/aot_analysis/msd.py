@@ -1670,22 +1670,71 @@ def plot_hydrodynamic_radius_analysis(
     # Plot options
     # sns.set_palette("Dark2")
 
-    # Plot 1: Hydrodynamic radius vs aggregation number
+    # Plot 1: Hydrodynamic radius vs aggregation number with power law fit
     if len(rh_df) > 0:
         plt.figure()
 
         rh_df.sort_values(by="aggregation_number", inplace=True)
 
+        # Extract data for fitting
+        N_a = rh_df["aggregation_number"].values
+        R_H = rh_df["hydrodynamic_radius_avg"].values
+        R_H_std = rh_df["hydrodynamic_radius_std"].values
+
+        # Plot data points with error bars
         plt.errorbar(
-            rh_df["aggregation_number"],
-            rh_df["hydrodynamic_radius_avg"],
-            yerr=rh_df["hydrodynamic_radius_std"],
-            fmt="o-",
+            N_a,
+            R_H,
+            yerr=R_H_std,
+            fmt="o",
             capsize=5,
             capthick=2,
             alpha=0.8,
             label="Hydrodynamic radius",
+            markersize=6,
         )
+
+        # Perform weighted least squares fit for R_H = A * N_a^(1/3) with fixed exponent
+        # Fit directly: R_H = A * N_a^(1/3) using fit_intercept=False
+        if len(N_a) >= 2 and np.all(N_a > 0) and np.all(R_H > 0):
+            # Handle weights for WLS (inverse variance weighting)
+            # Avoid division by zero by adding small epsilon
+            weights = 1.0 / (R_H_std**2 + 1e-12)
+
+            # Use N_a^(1/3) as x values, fix the exponent to 1/3
+            X = (N_a ** (1 / 3)).reshape(-1, 1)
+            y = R_H
+
+            # Weighted linear regression with no intercept (fit_intercept=False)
+            # This fits R_H = A * N_a^(1/3)
+            regressor = LinearRegression(fit_intercept=False)
+            regressor.fit(X, y, sample_weight=weights)
+
+            A_fit = regressor.coef_[0]
+            exponent_fit = 1 / 3  # Fixed exponent
+
+            # Calculate R² for the fit
+            y_pred = regressor.predict(X)
+            # Weighted R² for regression through origin
+            ss_res = np.sum(weights * (y - y_pred) ** 2)
+            ss_tot = np.sum(
+                weights * y**2
+            )  # Total sum of squares for regression through origin
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+            # Generate smooth curve for plotting
+            N_a_fit = np.linspace(N_a.min(), N_a.max(), 100)
+            R_H_fit = A_fit * (N_a_fit ** (1 / 3))
+
+            # Plot the fit
+            plt.plot(
+                N_a_fit,
+                R_H_fit,
+                "-",
+                linewidth=2,
+                label=f"Fit: $R_H = {A_fit:.2f} \\cdot N_a^{{1/3}}$",
+                zorder=-1,
+            )
 
         plt.xlabel("Aggregation Number")
         plt.ylabel("Hydrodynamic Radius ($\\mathrm{\\AA}$)")
