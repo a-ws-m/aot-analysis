@@ -1645,6 +1645,7 @@ def plot_hydrodynamic_radius_analysis(
     fix_exponent: bool = False,
     two_regime: bool = False,
     offset_se: bool = False,
+    plot_regime2_only: bool = False,
 ):
     """Create plots for hydrodynamic radius analysis and calculate effective viscosity.
 
@@ -1666,6 +1667,8 @@ def plot_hydrodynamic_radius_analysis(
         If True, fit a two-regime Stokes-Einstein relationship
     offset_se : bool, default=False
         If True, fit offset Stokes-Einstein relationship D = A/(R_H + B)
+    plot_regime2_only : bool, default=False
+        If True and two_regime=True, plot only regime 2 (D = A_2/R_H) with linear y-scale
     """
     # Plot options
     # sns.set_palette("Dark2")
@@ -1873,52 +1876,76 @@ def plot_hydrodynamic_radius_analysis(
                                     x_break * 1e10
                                 )  # Convert breakpoint back to Å for plotting
 
-                                # Regime 1: R_H < x_break
-                                mask_low = rh_range < x_break_ang
-                                d_theory_low = np.zeros_like(rh_range)
-                                d_theory_low[mask_low] = A_1 / rh_range_m[mask_low] + B
-
-                                # Regime 2: R_H >= x_break
-                                mask_high = rh_range >= x_break_ang
-                                d_theory_high = np.zeros_like(rh_range)
-                                d_theory_high[mask_high] = A_2 / rh_range_m[mask_high]
-
-                                # Plot both regimes
-                                if np.any(mask_low):
+                                if plot_regime2_only:
+                                    # Plot only regime 2 (D = A_2/R_H) with linear y-scale
+                                    d_theory_regime2 = A_2 / rh_range_m
                                     plt.plot(
-                                        rh_range[mask_low],
-                                        d_theory_low[mask_low],
+                                        rh_range,
+                                        d_theory_regime2,
                                         "-",
                                         linewidth=2,
-                                        label=f"Regime 1: $\\eta_1$ = {eta_1*1000:.2f} $\\pm$ {eta_1_err*1000:.2f} mPa·s",
+                                        label=f"Large $N_a$: $\\eta_2$ = {eta_2*1000:.2f} $\\pm$ {eta_2_err*1000:.2f} mPa·s",
+                                    )
+                                    # Add vertical line at breakpoint
+                                    plt.axvline(
+                                        x_break_ang,
+                                        color="gray",
+                                        linestyle="--",
+                                        alpha=0.7,
+                                        label=f"Breakpoint: {x_break_ang:.0f} $\\mathrm{{\\AA}}$",
+                                    )
+                                else:
+                                    # Plot both regimes with breakpoint (original behavior)
+                                    # Regime 1: R_H < x_break
+                                    mask_low = rh_range < x_break_ang
+                                    d_theory_low = np.zeros_like(rh_range)
+                                    d_theory_low[mask_low] = (
+                                        A_1 / rh_range_m[mask_low] + B
                                     )
 
-                                if np.any(mask_high):
+                                    # Regime 2: R_H >= x_break
+                                    mask_high = rh_range >= x_break_ang
+                                    d_theory_high = np.zeros_like(rh_range)
+                                    d_theory_high[mask_high] = (
+                                        A_2 / rh_range_m[mask_high]
+                                    )
+
+                                    # Plot both regimes
+                                    if np.any(mask_low):
+                                        plt.plot(
+                                            rh_range[mask_low],
+                                            d_theory_low[mask_low],
+                                            "-",
+                                            linewidth=2,
+                                            label=f"Regime 1: $\\eta_1$ = {eta_1*1000:.2f} $\\pm$ {eta_1_err*1000:.2f} mPa·s",
+                                        )
+
+                                    if np.any(mask_high):
+                                        plt.plot(
+                                            rh_range[mask_high],
+                                            d_theory_high[mask_high],
+                                            "-",
+                                            linewidth=2,
+                                            label=f"Regime 2: $\\eta_2$ = {eta_2*1000:.2f} $\\pm$ {eta_2_err*1000:.2f} mPa·s",
+                                        )
+
+                                    # Mark the breakpoint
+                                    y_break = A_2 / x_break  # D at breakpoint
+                                    plt.axvline(
+                                        x_break_ang,
+                                        color="gray",
+                                        linestyle="--",
+                                        alpha=0.7,
+                                        label=f"Breakpoint: {x_break_ang:.1f} $\\mathrm{{\\AA}}$",
+                                    )
                                     plt.plot(
-                                        rh_range[mask_high],
-                                        d_theory_high[mask_high],
-                                        "-",
-                                        linewidth=2,
-                                        label=f"Regime 2: $\\eta_2$ = {eta_2*1000:.2f} $\\pm$ {eta_2_err*1000:.2f} mPa·s",
+                                        x_break_ang,
+                                        y_break,
+                                        "ko",
+                                        markersize=8,
+                                        markerfacecolor="white",
+                                        markeredgewidth=2,
                                     )
-
-                                # Mark the breakpoint
-                                y_break = A_2 / x_break  # D at breakpoint
-                                plt.axvline(
-                                    x_break_ang,
-                                    color="gray",
-                                    linestyle="--",
-                                    alpha=0.7,
-                                    label=f"Breakpoint: {x_break_ang:.1f} $\\mathrm{{\\AA}}$",
-                                )
-                                plt.plot(
-                                    x_break_ang,
-                                    y_break,
-                                    "ko",
-                                    markersize=8,
-                                    markerfacecolor="white",
-                                    markeredgewidth=2,
-                                )
 
                                 print(f"Two-regime Stokes-Einstein fit results:")
                                 print(
@@ -2097,14 +2124,21 @@ def plot_hydrodynamic_radius_analysis(
             plt.ylabel("Diffusion Coefficient ($\\mathrm{m^2/s}$)")
             plt.title("Diffusion Coefficient vs Hydrodynamic Radius")
             plt.legend()
-            plt.yscale("log")
+            # Use linear y-scale for regime 2 only plots, otherwise use log scale
+            if two_regime and plot_regime2_only:
+                plt.yscale("linear")
+            else:
+                plt.yscale("log")
             # plt.xscale("log")
             plt.tight_layout()
 
             if output_dir:
                 # Generate filename based on fitting method
                 if two_regime:
-                    filename_suffix = "_two_regime"
+                    if plot_regime2_only:
+                        filename_suffix = "_two_regime_regime2_only"
+                    else:
+                        filename_suffix = "_two_regime"
                 elif offset_se:
                     filename_suffix = "_offset"
                 elif fix_exponent:
@@ -2289,6 +2323,11 @@ def main():
         "--plot-dir",
         default=".",
         help="Directory to save plots (default: current directory)",
+    )
+    parser.add_argument(
+        "--plot-regime2-only",
+        action="store_true",
+        help="For two-regime analysis, plot only regime 2 (D = A_2/R_H) with linear y-scale",
     )
 
     args = parser.parse_args()
@@ -2557,6 +2596,7 @@ def main():
                 fix_exponent=args.fix_exponent,
                 two_regime=args.two_regime_se,
                 offset_se=args.offset_se,
+                plot_regime2_only=args.plot_regime2_only,
             )
 
             if not args.quiet:
