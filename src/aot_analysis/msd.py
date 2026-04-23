@@ -806,16 +806,16 @@ def plot_sd_fit(
     # Create the plot
     plt.figure()
 
-    # Create violin plot to show the distribution of SD values at each time point
-    sns.violinplot(
+    # Create box plot to show the distribution of SD values at each time point
+    sns.boxplot(
         data=filtered_data,
         x="delta_t",
         y="sd",
         native_scale=True,
-        alpha=0.7,
-        common_norm=False,
+        # alpha=0.7,
+        # common_norm=False,
         color="lightblue",
-        inner="box",
+        # inner="box",
     )
 
     # Plot fitted line on top
@@ -830,15 +830,17 @@ def plot_sd_fit(
     plt.plot(
         t_fit,
         sd_fit,
-        "r-",
+        # "r-",
+        c=sns.color_palette()[1],
         linewidth=3,
         label=f"Weighted fit: D = {diffusion_coeff_si:.2e} $\\mathrm{{m^2/s}}$",
-        zorder=-1,
+        # zorder=-1,
     )
 
     plt.xlabel("$\\Delta t$ (ps)")
     plt.ylabel("SD ($\\mathrm{\\AA}^2$)")
     plt.title(f"SD Distribution vs Time for Aggregate Size {aggregate_size}")
+    plt.ylim(0)  # Set y-axis to start at 0 for better visualization
     plt.legend()
 
     if show_r_squared:
